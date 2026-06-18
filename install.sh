@@ -34,6 +34,9 @@ OPT_NO_PKG=0
 DETECTED_SHELL=""
 RC_FILE=""
 
+# Directory of this script (for CI local version file fallback)
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2> /dev/null && pwd || echo .)"
+
 BREW_PACKAGE="lumeweb/tap/pinner"
 
 # CI mode env vars (read once at startup, like PINNER_VERSION/PINNER_INSTALL)
@@ -185,11 +188,19 @@ check_32bit() {
 
 get_latest_version() {
     _ver=""
+
+    # CI mode: read from local version file (avoids network dependency)
+    if [ -n "${CI:-}" ] && [ -f "${SCRIPT_DIR:-.}/version" ]; then
+        _ver="$(cat "${SCRIPT_DIR:-.}/version" 2> /dev/null || true)"
+    fi
+
     # Primary: version endpoint
-    if check_cmd curl; then
-        _ver="$(curl -fsSL "$VERSION_URL" 2> /dev/null || true)"
-    elif check_cmd wget; then
-        _ver="$(wget -qO- "$VERSION_URL" 2> /dev/null || true)"
+    if [ -z "$_ver" ]; then
+        if check_cmd curl; then
+            _ver="$(curl -fsSL "$VERSION_URL" 2> /dev/null || true)"
+        elif check_cmd wget; then
+            _ver="$(wget -qO- "$VERSION_URL" 2> /dev/null || true)"
+        fi
     fi
     _ver="$(printf '%s' "$_ver" | sed 's/^v//' | tr -d '[:space:]')"
 
@@ -704,8 +715,12 @@ main() {
     detect_wsl
     detect_root
 
-    # Get latest version
-    VERSION="$(get_latest_version)"
+    # Version: PINNER_VERSION override > version endpoint/file fallback
+    if [ -n "${PINNER_VERSION:-}" ]; then
+        VERSION="$PINNER_VERSION"
+    else
+        VERSION="$(get_latest_version)"
+    fi
     info "Installing Pinner CLI v${VERSION} for ${PLATFORM}/${ARCH}"
 
     # Create temp directory early (needed for package manager downloads)
