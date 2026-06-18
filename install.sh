@@ -87,8 +87,8 @@ curl_is_snap() {
 }
 
 curl_tls_flags() {
-    if curl --proto '=https' --tlsv1.2 --help > /dev/null 2>&1; then
-        printf '%s' "--proto '=https' --tlsv1.2"
+    if curl --proto =https --tlsv1.2 --help > /dev/null 2>&1; then
+        printf '%s' "--proto =https --tlsv1.2"
     fi
 }
 
