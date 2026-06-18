@@ -183,6 +183,11 @@ function Get-InstallDir {
 
 function Add-ToPath($Dir) {
     $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $current) {
+        [Environment]::SetEnvironmentVariable('Path', $Dir, 'User')
+        Write-Info "Added $Dir to user PATH."
+        return
+    }
     if ($current -split ';' | Where-Object { $_ -eq $Dir }) { return }
     $newPath = if ($current.EndsWith(';')) { "$current$Dir" } else { "$current;$Dir" }
     [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
