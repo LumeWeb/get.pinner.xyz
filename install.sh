@@ -105,34 +105,30 @@ download() {
 
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        if ! curl --fail --silent --location $(curl_tls_flags) --connect-timeout 30 --max-time 300 --output "$_file" "$_url"; then
-            error "Download failed: $_url"
-            error "Check your network connection and that the version/architecture is correct."
-            exit 1
-        fi
+        curl --fail --silent --location $(curl_tls_flags) --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
-        if ! wget --quiet --timeout=30 --output-document="$_file" "$_url"; then
-            error "Download failed: $_url"
-            error "Check your network connection and that the version/architecture is correct."
-            exit 1
-        fi
+        wget --quiet --timeout=30 --output-document="$_file" "$_url"
     elif check_cmd fetch; then
-        if ! fetch --quiet --timeout=30 --output="$_file" "$_url"; then
-            error "Download failed: $_url"
-            error "Check your network connection and that the version/architecture is correct."
-            exit 1
-        fi
+        fetch --quiet --timeout=30 --output="$_file" "$_url"
     else
         error "No download tool found. Install curl, wget, or fetch."
         exit 1
     fi
 }
 
-download_or_return() {
-    if (download "$1" "$2"); then
-        return 0
+download_or_fail() {
+    if ! download "$1" "$2"; then
+        error "Download failed: $1"
+        error "Check your network connection and that the version/architecture is correct."
+        exit 1
     fi
-    return 1
+}
+
+download_or_warn() {
+    if ! download "$1" "$2"; then
+        return 1
+    fi
+    return 0
 }
 
 # ─── Platform detection ──────────────────────────────────────────────────────
@@ -186,6 +182,18 @@ check_32bit() {
 
 # ─── Version detection ───────────────────────────────────────────────────────
 
+fetch_url() {
+    if check_cmd curl; then
+        curl -fsSL "$1" 2> /dev/null || true
+    elif check_cmd wget; then
+        wget -qO- "$1" 2> /dev/null || true
+    fi
+}
+
+clean_version() {
+    printf '%s' "$1" | sed 's/^v//' | tr -d '[:space:]'
+}
+
 get_latest_version() {
     _ver=""
 
@@ -196,25 +204,15 @@ get_latest_version() {
 
     # Primary: version endpoint
     if [ -z "$_ver" ]; then
-        if check_cmd curl; then
-            _ver="$(curl -fsSL "$VERSION_URL" 2> /dev/null || true)"
-        elif check_cmd wget; then
-            _ver="$(wget -qO- "$VERSION_URL" 2> /dev/null || true)"
-        fi
+        _ver="$(fetch_url "$VERSION_URL")"
     fi
-    _ver="$(printf '%s' "$_ver" | sed 's/^v//' | tr -d '[:space:]')"
+    _ver="$(clean_version "$_ver")"
 
     # Fallback: GitHub API
     if [ -z "$_ver" ]; then
         _api_url="https://api.github.com/repos/${REPO}/releases/latest"
-        if check_cmd curl; then
-            _ver="$(curl -fsSL "$_api_url" 2> /dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')"
-        elif check_cmd wget; then
-            _ver="$(wget -qO- "$_api_url" 2> /dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')"
-        fi
-        # Strip leading 'v'
-        _ver="$(printf '%s' "$_ver" | sed 's/^v//')"
-        _ver="$(printf '%s' "$_ver" | tr -d '[:space:]')"
+        _ver="$(fetch_url "$_api_url" | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')"
+        _ver="$(clean_version "$_ver")"
     fi
 
     if [ -z "$_ver" ]; then
@@ -471,7 +469,7 @@ Flags:
 
 Environment Variables:
   PINNER_INSTALL     Custom install directory (same as --bin-dir)
-  PINNER_VERSION     Override version (skips PM detection + latest-version fetch)
+  PINNER_VERSION     Override version (skips version fetch only; use --no-pkg to skip PM)
   PINNER_BREW_TAP    Local path to a Homebrew tap directory (CI mode)
   PINNER_BREW_FORMULA  Override brew formula name (default: lumeweb/tap/pinner)
 
@@ -599,64 +597,47 @@ try_homebrew_install() {
     return 0
 }
 
-try_dpkg_install() {
-    if ! check_cmd dpkg; then
+try_pkg_install() {
+    _pm_cmd="$1"
+    _ext="$2"
+    _install_cmd="$3"
+    _install_arg="$4"
+
+    if ! check_cmd "$_pm_cmd"; then
         return 1
     fi
     if [ "$(id -u)" != 0 ] && ! check_cmd sudo; then
         return 1
     fi
-    info "Detected dpkg. Installing .deb package..."
-    _deb_name="${ARCHIVE_NAME}_${VERSION}_${PLATFORM}_${ARCH}.deb"
-    _deb_url="${OPT_BASE_URL:-${BASE_URL}}/v${VERSION}/${_deb_name}"
-    _deb_file="${_tmpdir}/${_deb_name}"
-    if ! download_or_return "$_deb_url" "$_deb_file"; then
-        warn "deb package download failed. Falling back to binary install."
+    info "Detected $_pm_cmd. Installing .${_ext} package..."
+    _pkg_name="${ARCHIVE_NAME}_${VERSION}_${PLATFORM}_${ARCH}.${_ext}"
+    _pkg_url="${OPT_BASE_URL:-${BASE_URL}}/v${VERSION}/${_pkg_name}"
+    _pkg_file="${_tmpdir}/${_pkg_name}"
+    if ! download_or_warn "$_pkg_url" "$_pkg_file"; then
+        warn "$_ext package download failed. Falling back to binary install."
         return 1
     fi
     if [ "$(id -u)" = 0 ]; then
-        if ! dpkg -i "$_deb_file" 2> /dev/null; then
-            warn "dpkg install failed. Falling back to binary install."
+        if ! "$_install_cmd" $_install_arg "$_pkg_file" 2> /dev/null; then
+            warn "$_pm_cmd install failed. Falling back to binary install."
             return 1
         fi
     else
-        if ! sudo dpkg -i "$_deb_file" 2> /dev/null; then
-            warn "dpkg install failed. Falling back to binary install."
+        if ! sudo "$_install_cmd" $_install_arg "$_pkg_file" 2> /dev/null; then
+            warn "$_pm_cmd install failed. Falling back to binary install."
             return 1
         fi
     fi
-    completed "Pinner CLI installed via dpkg."
+    completed "Pinner CLI installed via $_pm_cmd."
     return 0
 }
 
+try_dpkg_install() {
+    try_pkg_install dpkg deb dpkg "-i"
+}
+
 try_rpm_install() {
-    if ! check_cmd rpm; then
-        return 1
-    fi
-    if [ "$(id -u)" != 0 ] && ! check_cmd sudo; then
-        return 1
-    fi
-    info "Detected rpm. Installing .rpm package..."
-    _rpm_name="${ARCHIVE_NAME}_${VERSION}_${PLATFORM}_${ARCH}.rpm"
-    _rpm_url="${OPT_BASE_URL:-${BASE_URL}}/v${VERSION}/${_rpm_name}"
-    _rpm_file="${_tmpdir}/${_rpm_name}"
-    if ! download_or_return "$_rpm_url" "$_rpm_file"; then
-        warn "rpm package download failed. Falling back to binary install."
-        return 1
-    fi
-    if [ "$(id -u)" = 0 ]; then
-        if ! rpm -i "$_rpm_file" 2> /dev/null; then
-            warn "rpm install failed. Falling back to binary install."
-            return 1
-        fi
-    else
-        if ! sudo rpm -i "$_rpm_file" 2> /dev/null; then
-            warn "rpm install failed. Falling back to binary install."
-            return 1
-        fi
-    fi
-    completed "Pinner CLI installed via rpm."
-    return 0
+    try_pkg_install rpm rpm rpm "-i"
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
@@ -728,7 +709,7 @@ main() {
     trap 'rm -rf "$_tmpdir"' EXIT
 
     # Try package manager install
-    if [ "$OPT_NO_PKG" = 0 ] && [ -z "${PINNER_VERSION:-}" ]; then
+    if [ "$OPT_NO_PKG" = 0 ]; then
         if [ "$PLATFORM" = "darwin" ]; then
             if try_homebrew_install; then
                 exit 0
@@ -753,7 +734,7 @@ main() {
     _checksums="${_tmpdir}/checksums.txt"
 
     info "Downloading ${_archive_name}..."
-    download "$_archive_url" "$_archive"
+    download_or_fail "$_archive_url" "$_archive"
 
     if [ ! -f "$_archive" ]; then
         error "Download failed. File not found: $_archive"
@@ -762,7 +743,7 @@ main() {
     fi
 
     info "Downloading checksums..."
-    download "$_checksums_url" "$_checksums"
+    download_or_fail "$_checksums_url" "$_checksums"
 
     # Verify SHA256
     info "Verifying SHA256 checksum..."

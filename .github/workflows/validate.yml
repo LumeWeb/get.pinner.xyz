@@ -171,7 +171,7 @@ jobs:
                         exit 1
                       fi
 
-            - name: PINNER_VERSION env var skips PM detection (Debian)
+            - name: PINNER_VERSION env var overrides version fetch (Debian)
               uses: vjik/docker-run@v1
               with:
                   image: debian:12-slim
@@ -181,7 +181,7 @@ jobs:
                   command: |
                       apt-get update && apt-get install -y curl
                       output=$(sh /workspace/install.sh --debug 2>&1 || true)
-                      if echo "$output" | grep -qi "dpkg\|homebrew\|rpm"; then
-                        echo "FAIL: PM was attempted when PINNER_VERSION set"
+                      if echo "$output" | grep -qi "Could not determine the latest version"; then
+                        echo "FAIL: PINNER_VERSION did not override version fetch"
                         exit 1
                       fi

@@ -42,6 +42,18 @@ function New-TempDir {
     }
 }
 
+function Invoke-PMInstall {
+    param([string]$Name, [scriptblock]$Action, [string]$SuccessMsg, [string]$AlreadyInstalledMsg)
+    try {
+        & $Action
+        if ($LASTEXITCODE -eq 0) { Write-Ok $SuccessMsg; exit 0 }
+        if ($AlreadyInstalledMsg -and $LASTEXITCODE -eq -1966105625) { Write-Ok $AlreadyInstalledMsg; exit 0 }
+        Write-Warn "$Name install failed (exit code $LASTEXITCODE). Falling back..."
+    } catch {
+        Write-Warn "$Name install failed: $_. Falling back..."
+    }
+}
+
 function try-winget-install {
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return }
 
@@ -56,40 +68,17 @@ function try-winget-install {
             $wingetSettings = @{ visual = @{ progressBar = 'disabled' } } | ConvertTo-Json -Depth 3
             $wingetSettings | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
         }
-        # LocalManifestFiles is an admin setting — must use CLI, not settings.json
         & winget.exe settings --enable LocalManifestFiles 2>$null
     }
 
     if ($Script:IsCI -and $env:PINNER_WINGET_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_WINGET_MANIFEST)..."
-        try {
-            winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Ok 'Installed via winget (manifest).'
-                exit 0
-            }
-            Write-Warn "winget manifest install failed (exit code $LASTEXITCODE). Falling back..."
-        } catch {
-            Write-Warn "winget manifest install failed: $_. Falling back..."
-        }
+        Invoke-PMInstall 'winget' { winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null } 'Installed via winget (manifest).'
         return
     }
 
     Write-Info 'Found winget. Attempting package manager install...'
-    try {
-        winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Ok 'Installed via winget.'
-            exit 0
-        }
-        if ($LASTEXITCODE -eq -1966105625) {
-            Write-Ok 'Already installed via winget.'
-            exit 0
-        }
-        Write-Warn "winget install failed (exit code $LASTEXITCODE). Falling back..."
-    } catch {
-        Write-Warn "winget install failed: $_. Falling back..."
-    }
+    Invoke-PMInstall 'winget' { winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null } 'Installed via winget.' 'Already installed via winget.'
 }
 
 function try-scoop-install {
@@ -97,31 +86,12 @@ function try-scoop-install {
 
     if ($Script:IsCI -and $env:PINNER_SCOOP_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_SCOOP_MANIFEST)..."
-        try {
-            scoop install $env:PINNER_SCOOP_MANIFEST 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Ok 'Installed via scoop (manifest).'
-                exit 0
-            }
-            Write-Warn "scoop manifest install failed (exit code $LASTEXITCODE). Falling back..."
-        } catch {
-            Write-Warn "scoop manifest install failed: $_. Falling back..."
-        }
+        Invoke-PMInstall 'scoop' { scoop install $env:PINNER_SCOOP_MANIFEST 2>$null } 'Installed via scoop (manifest).'
         return
     }
 
     Write-Info 'Found scoop. Attempting package manager install...'
-    try {
-        scoop bucket add lumeweb $Script:ScoopBucketUrl 2>$null
-        scoop install pinner 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Ok 'Installed via scoop.'
-            exit 0
-        }
-        Write-Warn "scoop install failed (exit code $LASTEXITCODE). Falling back..."
-    } catch {
-        Write-Warn "scoop install failed: $_. Falling back..."
-    }
+    Invoke-PMInstall 'scoop' { scoop bucket add lumeweb $Script:ScoopBucketUrl 2>$null; scoop install pinner 2>$null } 'Installed via scoop.'
 }
 
 # Constrained language mode check
