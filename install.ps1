@@ -48,7 +48,7 @@ function try-winget-install {
     if ($Script:IsCI -and $env:PINNER_WINGET_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_WINGET_MANIFEST)..."
         try {
-            winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements 2>$null
+            winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity --no-progress 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Ok 'Installed via winget (manifest).'
                 exit 0
@@ -62,7 +62,7 @@ function try-winget-install {
 
     Write-Info 'Found winget. Attempting package manager install...'
     try {
-        winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements 2>$null
+        winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity --no-progress 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Ok 'Installed via winget.'
             exit 0
