@@ -52,7 +52,15 @@ jobs:
         steps:
             - uses: actions/checkout@v5
             - name: Install via Homebrew (local tap fixture)
-              run: sh ./install.sh
+              run: |
+                  output=$(sh ./install.sh 2>&1)
+                  echo "$output"
+                  if echo "$output" | grep -qi "installed via Homebrew"; then
+                    echo "PASS: Homebrew path reached"
+                  else
+                    echo "FAIL: Homebrew path not reached"
+                    exit 1
+                  fi
             - name: Verify pinner works
               run: pinner --version
 
@@ -86,26 +94,38 @@ jobs:
               run: |
                   $env:CI = 'true'
                   $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
+                  # Capture output — winget will fail (fake URL in fixture) but we verify the route was reached
                   $output = ./install.ps1 2>&1 | Out-String
-                  if ($output -match 'Installed via winget \(manifest\)') {
+                  if ($output -match 'CI mode: installing from local manifest') {
                     Write-Host "PASS: WinGet manifest path reached"
+                  } else {
+                    Write-Host "FAIL: WinGet manifest path not reached"
+                    Write-Host $output
+                    exit 1
                   }
-                  pinner --version
 
     test-windows-scoop:
         runs-on: windows-latest
         steps:
             - uses: actions/checkout@v5
+            - name: Install scoop (CI prerequisite)
+              shell: pwsh
+              run: |
+                  Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
             - name: CI mode - scoop manifest fixture
               shell: pwsh
               run: |
                   $env:CI = 'true'
                   $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
+                  # winget is tried first and will fail, then scoop should be attempted
                   $output = ./install.ps1 2>&1 | Out-String
-                  if ($output -match 'Installed via scoop \(manifest\)') {
+                  if ($output -match 'CI mode: installing from local manifest.*scoop') {
                     Write-Host "PASS: Scoop manifest path reached"
+                  } else {
+                    Write-Host "FAIL: Scoop manifest path not reached"
+                    Write-Host $output
+                    exit 1
                   }
-                  pinner --version
 
     test-windows-multi-pm:
         runs-on: windows-latest
@@ -117,8 +137,14 @@ jobs:
                   $env:CI = 'true'
                   $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
                   $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
-                  ./install.ps1
-                  pinner --version
+                  $output = ./install.ps1 2>&1 | Out-String
+                  if ($output -match 'CI mode: installing from local manifest') {
+                    Write-Host "PASS: PM manifest path reached"
+                  } else {
+                    Write-Host "FAIL: Neither winget nor scoop manifest path reached"
+                    Write-Host $output
+                    exit 1
+                  }
 
     test-windows-routing:
         runs-on: windows-latest

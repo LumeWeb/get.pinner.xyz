@@ -77,7 +77,7 @@ function try-winget-install {
 
     if ($Script:IsCI -and $env:PINNER_WINGET_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_WINGET_MANIFEST)..."
-        Invoke-PMInstall 'winget' { winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null } 'Installed via winget (manifest).'
+        Invoke-PMInstall 'winget' { winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity } 'Installed via winget (manifest).'
         return
     }
 
@@ -90,7 +90,7 @@ function try-scoop-install {
 
     if ($Script:IsCI -and $env:PINNER_SCOOP_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_SCOOP_MANIFEST)..."
-        Invoke-PMInstall 'scoop' { scoop install $env:PINNER_SCOOP_MANIFEST 2>$null } 'Installed via scoop (manifest).'
+        Invoke-PMInstall 'scoop' { scoop install $env:PINNER_SCOOP_MANIFEST } 'Installed via scoop (manifest).'
         return
     }
 

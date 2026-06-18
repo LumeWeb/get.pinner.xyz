@@ -574,22 +574,22 @@ try_homebrew_install() {
     fi
     info "Detected Homebrew. Installing via brew..."
     if [ -n "$PINNER_BREW_TAP" ] && [ -d "$PINNER_BREW_TAP" ]; then
-        if ! brew tap lumeweb/tap "$PINNER_BREW_TAP" 2> /dev/null; then
+        if ! brew tap lumeweb/tap "$PINNER_BREW_TAP"; then
             warn "brew tap (local) failed. Falling back to binary install."
             return 1
         fi
     else
-        if ! brew tap lumeweb/tap 2> /dev/null; then
+        if ! brew tap lumeweb/tap; then
             warn "brew tap failed. Falling back to binary install."
             return 1
         fi
     fi
-    if brew list "$PINNER_BREW_FORMULA" 2> /dev/null; then
+    if brew list "$PINNER_BREW_FORMULA" 2>/dev/null; then
         info "$PINNER_BREW_FORMULA is already installed via Homebrew."
         completed "Pinner CLI installed via Homebrew."
         return 0
     fi
-    if ! brew install "$PINNER_BREW_FORMULA" 2> /dev/null; then
+    if ! brew install "$PINNER_BREW_FORMULA"; then
         warn "brew install failed. Falling back to binary install."
         return 1
     fi
