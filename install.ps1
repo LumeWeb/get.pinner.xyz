@@ -65,8 +65,12 @@ function try-winget-install {
         }
         if (Test-Path $wingetSettingsDir) {
             $settingsFile = Join-Path $wingetSettingsDir 'settings.json'
-            $wingetSettings = @{ visual = @{ progressBar = 'disabled' } } | ConvertTo-Json -Depth 3
-            $wingetSettings | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
+            $wingetSettings = if (Test-Path $settingsFile) {
+                try { Get-Content $settingsFile -Raw | ConvertFrom-Json -AsHashtable } catch { @{} }
+            } else { @{} }
+            if (-not $wingetSettings.ContainsKey('visual')) { $wingetSettings['visual'] = @{} }
+            $wingetSettings['visual']['progressBar'] = 'disabled'
+            $wingetSettings | ConvertTo-Json -Depth 10 | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
         }
         & winget.exe settings --enable LocalManifestFiles 2>$null
     }
