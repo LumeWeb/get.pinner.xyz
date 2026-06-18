@@ -45,10 +45,23 @@ function New-TempDir {
 function try-winget-install {
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return }
 
+    # Disable winget spinner/progress bar for clean CI output
+    if ($Script:IsCI) {
+        $wingetSettingsDir = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState'
+        if (-not (Test-Path $wingetSettingsDir)) {
+            $wingetSettingsDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Settings'
+        }
+        if (Test-Path $wingetSettingsDir) {
+            $settingsFile = Join-Path $wingetSettingsDir 'settings.json'
+            $wingetSettings = @{ visual = @{ progressBar = 'disabled' } } | ConvertTo-Json -Depth 3
+            $wingetSettings | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+    }
+
     if ($Script:IsCI -and $env:PINNER_WINGET_MANIFEST) {
         Write-Info "CI mode: installing from local manifest ($env:PINNER_WINGET_MANIFEST)..."
         try {
-            winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity --no-progress 2>$null
+            winget.exe install --manifest $env:PINNER_WINGET_MANIFEST --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Ok 'Installed via winget (manifest).'
                 exit 0
@@ -62,7 +75,7 @@ function try-winget-install {
 
     Write-Info 'Found winget. Attempting package manager install...'
     try {
-        winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity --no-progress 2>$null
+        winget.exe install --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Ok 'Installed via winget.'
             exit 0
