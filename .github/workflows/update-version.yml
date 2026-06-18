@@ -1,0 +1,35 @@
+name: Update Version
+
+on:
+  repository_dispatch:
+    types: [pinner-cli-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to write (e.g. 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write version file
+        run: |
+          VERSION="${{ github.event.client_payload.version || github.event.inputs.version }}"
+          # Strip leading 'v' if present (tags are v-prefixed, version file should not be)
+          VERSION="${VERSION#v}"
+          printf '%s\n' "$VERSION" > version
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version
+          git diff --cached --quiet || git commit -m "chore: update version to $(cat version)"
+          git push

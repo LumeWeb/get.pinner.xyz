@@ -1,0 +1,9 @@
+PackageIdentifier: Pinner.Cli
+PackageVersion: 0.0.0-test
+PackageLocale: en-US
+Publisher: Pinner
+PackageName: Pinner CLI
+ShortDescription: CLI for pinning content to IPFS
+License: MIT
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

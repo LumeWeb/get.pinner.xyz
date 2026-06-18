@@ -1,0 +1,13 @@
+{
+    "version": "0.0.0-test",
+    "description": "CLI for pinning content to IPFS",
+    "homepage": "https://pinner.xyz",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://example.com/pinner-cli_0.0.0-test_windows_amd64.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "pinner.exe"
+}
