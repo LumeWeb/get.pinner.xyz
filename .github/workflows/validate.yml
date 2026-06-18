@@ -1,0 +1,223 @@
+name: Validate Install Scripts
+
+on:
+    push:
+        branches: [develop]
+    pull_request:
+        branches: [develop]
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install shellcheck
+              run: sudo apt-get update && sudo apt-get install -y shellcheck
+            - name: Lint install.sh
+              run: shellcheck -s sh install.sh
+            - name: Lint install.ps1
+              shell: pwsh
+              run: |
+                  Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+                  $results = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Error
+                  if ($results) { $results | Format-Table; exit 1 }
+
+    test-linux:
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                container: [ubuntu:24.04, alpine:latest, debian:12-slim]
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install pinner in ${{ matrix.container }}
+              uses: vjik/docker-run@v1
+              with:
+                  image: ${{ matrix.container }}
+                  volumes: ${{ github.workspace }}:/workspace
+                  env: |
+                      CI=true
+                  command: |
+                      case "${{ matrix.container }}" in
+                        alpine*)  apk add --no-cache curl ;;
+                        ubuntu*|debian*) apt-get update && apt-get install -y curl ;;
+                      esac
+                      sh /workspace/install.sh
+                      export PATH="$HOME/.local/bin:$PATH"
+                      pinner --version
+
+    test-macos-homebrew:
+        runs-on: macos-latest
+        env:
+            PINNER_BREW_TAP: ${{ github.workspace }}/tests/fixtures/homebrew-tap
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install via Homebrew (local tap fixture)
+              run: |
+                  git init tests/fixtures/homebrew-tap
+                  git -C tests/fixtures/homebrew-tap add -A
+                  git -C tests/fixtures/homebrew-tap commit -m "fixture" --allow-empty
+                  output=$(sh ./install.sh 2>&1)
+                  echo "$output"
+                  if echo "$output" | grep -qi "installed via Homebrew"; then
+                    echo "PASS: Homebrew path reached"
+                  else
+                    echo "FAIL: Homebrew path not reached"
+                    exit 1
+                  fi
+            - name: Verify pinner works
+              run: pinner --version
+
+    test-macos-binary:
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install via binary route (--no-pkg)
+              run: sh ./install.sh --no-pkg
+            - name: Verify pinner works
+              run: |
+                  export PATH="$HOME/.local/bin:$PATH"
+                  pinner --version
+
+    test-windows-binary:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Default install (binary route)
+              shell: pwsh
+              run: |
+                  ./install.ps1
+                  pinner --version
+
+    test-windows-winget:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: CI mode - winget manifest fixture
+              shell: pwsh
+              run: |
+                  $env:CI = 'true'
+                  $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
+                  # Capture output — winget will fail (fake URL in fixture) but we verify the route was reached
+                  $output = ./install.ps1 *>&1 | Out-String
+                  if ($output -match 'CI mode: installing from local manifest') {
+                    Write-Host "PASS: WinGet manifest path reached"
+                  } else {
+                    Write-Host "FAIL: WinGet manifest path not reached"
+                    Write-Host $output
+                    exit 1
+                  }
+
+    test-windows-scoop:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install scoop (CI prerequisite)
+              shell: pwsh
+              run: |
+                  Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+                  # Scoop installs to ~/scoop; add to PATH for this session
+                  $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+            - name: CI mode - scoop manifest fixture
+              shell: pwsh
+              run: |
+                  $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+                  $env:CI = 'true'
+                  $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
+                  # winget is tried first and will fail, then scoop should be attempted
+                  $output = ./install.ps1 *>&1 | Out-String
+                  if ($output -match 'CI mode: installing from local manifest.*scoop') {
+                    Write-Host "PASS: Scoop manifest path reached"
+                  } else {
+                    Write-Host "FAIL: Scoop manifest path not reached"
+                    Write-Host $output
+                    exit 1
+                  }
+
+    test-windows-multi-pm:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: CI mode - both manifest fixtures
+              shell: pwsh
+              run: |
+                  $env:CI = 'true'
+                  $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
+                  $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
+                  $output = ./install.ps1 *>&1 | Out-String
+                  if ($output -match 'CI mode: installing from local manifest') {
+                    Write-Host "PASS: PM manifest path reached"
+                  } else {
+                    Write-Host "FAIL: Neither winget nor scoop manifest path reached"
+                    Write-Host $output
+                    exit 1
+                  }
+
+    test-windows-routing:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: -NoPkg skips PM detection
+              shell: pwsh
+              run: |
+                  $output = ./install.ps1 -NoPkg *>&1 | Out-String
+                  if ($output -match 'winget|scoop') {
+                    Write-Host "FAIL: PM was attempted despite -NoPkg"
+                    exit 1
+                  }
+                  $env:PATH = "$env:LOCALAPPDATA\Programs\pinner;$env:PATH"
+                  pinner --version
+
+            - name: CI=1 env var
+              shell: pwsh
+              run: |
+                  $env:CI = '1'
+                  ./install.ps1
+                  $env:PATH = "$env:LOCALAPPDATA\Programs\pinner;$env:PATH"
+                  pinner --version
+
+    test-sh-routing:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: Homebrew not attempted on Linux (Alpine + mock brew)
+              uses: vjik/docker-run@v1
+              with:
+                  image: alpine:latest
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apk add --no-cache curl
+                      printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/brew && chmod +x /usr/local/bin/brew
+                      output=$(sh /workspace/install.sh --debug 2>&1 || true)
+                      if echo "$output" | grep -qi "homebrew"; then
+                        echo "FAIL: Homebrew was attempted on Linux"
+                        exit 1
+                      fi
+
+            - name: --no-pkg skips PM detection (Debian + dpkg present)
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --no-pkg --debug 2>&1 || true)
+                      if echo "$output" | grep -qi "dpkg\|homebrew\|rpm"; then
+                        echo "FAIL: PM was attempted despite --no-pkg"
+                        exit 1
+                      fi
+
+            - name: PINNER_VERSION env var overrides version fetch (Debian)
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  env: |
+                      PINNER_VERSION=0.0.1
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --debug 2>&1 || true)
+                      if echo "$output" | grep -qi "Could not determine the latest version"; then
+                        echo "FAIL: PINNER_VERSION did not override version fetch"
+                        exit 1
+                      fi

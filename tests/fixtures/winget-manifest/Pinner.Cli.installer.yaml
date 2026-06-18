@@ -1,0 +1,9 @@
+PackageIdentifier: Pinner.Cli
+PackageVersion: 0.0.0-test
+InstallerType: portable
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://example.com/pinner-cli_0.0.0-test_windows_amd64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0
