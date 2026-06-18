@@ -45,7 +45,7 @@ function New-TempDir {
 function try-winget-install {
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return }
 
-    # Disable winget spinner/progress bar for clean CI output
+    # CI mode: disable winget spinner and enable local manifests
     if ($Script:IsCI) {
         $wingetSettingsDir = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState'
         if (-not (Test-Path $wingetSettingsDir)) {
@@ -53,12 +53,11 @@ function try-winget-install {
         }
         if (Test-Path $wingetSettingsDir) {
             $settingsFile = Join-Path $wingetSettingsDir 'settings.json'
-            $wingetSettings = @{
-                visual = @{ progressBar = 'disabled' }
-                experimentalFeatures = @{ localManifestFiles = $true }
-            } | ConvertTo-Json -Depth 3
+            $wingetSettings = @{ visual = @{ progressBar = 'disabled' } } | ConvertTo-Json -Depth 3
             $wingetSettings | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
         }
+        # LocalManifestFiles is an admin setting — must use CLI, not settings.json
+        & winget.exe settings --enable LocalManifestFiles 2>$null
     }
 
     if ($Script:IsCI -and $env:PINNER_WINGET_MANIFEST) {
