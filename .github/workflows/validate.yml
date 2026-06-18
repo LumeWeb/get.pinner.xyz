@@ -10,7 +10,7 @@ jobs:
     lint:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - name: Install shellcheck
               run: sudo apt-get update && sudo apt-get install -y shellcheck
             - name: Lint install.sh
@@ -28,7 +28,7 @@ jobs:
             matrix:
                 container: [ubuntu:24.04, alpine:latest, debian:12-slim]
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - name: Install pinner in ${{ matrix.container }}
               uses: vjik/docker-run@v1
               with:
@@ -48,7 +48,7 @@ jobs:
         env:
             PINNER_BREW_TAP: ${{ github.workspace }}/tests/fixtures/homebrew-tap
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - name: Install via Homebrew (local tap fixture)
               run: sh ./install.sh
             - name: Verify pinner works
@@ -57,7 +57,7 @@ jobs:
     test-macos-binary:
         runs-on: macos-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - name: Install via binary route (--no-pkg)
               run: sh ./install.sh --no-pkg
             - name: Verify pinner works
@@ -68,7 +68,7 @@ jobs:
     test-windows:
         runs-on: windows-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Smoke test - default install
               shell: pwsh
@@ -127,7 +127,7 @@ jobs:
     test-sh-routing:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Homebrew not attempted on Linux (Alpine + mock brew)
               uses: vjik/docker-run@v1
