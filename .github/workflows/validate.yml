@@ -43,12 +43,23 @@ jobs:
                       export PATH="$HOME/.local/bin:$PATH"
                       pinner --version
 
-    test-macos:
+    test-macos-homebrew:
+        runs-on: macos-latest
+        env:
+            PINNER_BREW_TAP: ${{ github.workspace }}/tests/fixtures/homebrew-tap
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install via Homebrew (local tap fixture)
+              run: sh ./install.sh
+            - name: Verify pinner works
+              run: pinner --version
+
+    test-macos-binary:
         runs-on: macos-latest
         steps:
             - uses: actions/checkout@v4
-            - name: Install via install.sh
-              run: sh ./install.sh
+            - name: Install via binary route (--no-pkg)
+              run: sh ./install.sh --no-pkg
             - name: Verify pinner works
               run: |
                   export PATH="$HOME/.local/bin:$PATH"

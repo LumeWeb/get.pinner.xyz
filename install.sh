@@ -36,6 +36,10 @@ RC_FILE=""
 
 BREW_PACKAGE="lumeweb/tap/pinner"
 
+# CI mode env vars (read once at startup, like PINNER_VERSION/PINNER_INSTALL)
+PINNER_BREW_TAP="${PINNER_BREW_TAP:-}"
+PINNER_BREW_FORMULA="${PINNER_BREW_FORMULA:-$BREW_PACKAGE}"
+
 # ─── Helper functions ────────────────────────────────────────────────────────
 
 info() {
@@ -456,6 +460,9 @@ Flags:
 
 Environment Variables:
   PINNER_INSTALL     Custom install directory (same as --bin-dir)
+  PINNER_VERSION     Override version (skips PM detection + latest-version fetch)
+  PINNER_BREW_TAP    Local path to a Homebrew tap directory (CI mode)
+  PINNER_BREW_FORMULA  Override brew formula name (default: lumeweb/tap/pinner)
 
 Examples:
   curl -fsSL https://get.pinner.xyz | sh
@@ -557,16 +564,23 @@ try_homebrew_install() {
         return 1
     fi
     info "Detected Homebrew. Installing via brew..."
-    if ! brew tap lumeweb/tap 2> /dev/null; then
-        warn "brew tap failed. Falling back to binary install."
-        return 1
+    if [ -n "$PINNER_BREW_TAP" ] && [ -d "$PINNER_BREW_TAP" ]; then
+        if ! brew tap lumeweb/tap "$PINNER_BREW_TAP" 2> /dev/null; then
+            warn "brew tap (local) failed. Falling back to binary install."
+            return 1
+        fi
+    else
+        if ! brew tap lumeweb/tap 2> /dev/null; then
+            warn "brew tap failed. Falling back to binary install."
+            return 1
+        fi
     fi
-    if brew list "$BREW_PACKAGE" 2> /dev/null; then
-        info "$BREW_PACKAGE is already installed via Homebrew."
+    if brew list "$PINNER_BREW_FORMULA" 2> /dev/null; then
+        info "$PINNER_BREW_FORMULA is already installed via Homebrew."
         completed "Pinner CLI installed via Homebrew."
         return 0
     fi
-    if ! brew install "$BREW_PACKAGE" 2> /dev/null; then
+    if ! brew install "$PINNER_BREW_FORMULA" 2> /dev/null; then
         warn "brew install failed. Falling back to binary install."
         return 1
     fi
