@@ -301,9 +301,10 @@ try {
             if (-not (Test-Path $profileDir)) { New-Item -Path $profileDir -ItemType Directory -Force | Out-Null }
             $compHeader = '# Pinner CLI completions'
             if (-not (Test-Path $PROFILE) -or -not ((Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue) -match [regex]::Escape($compHeader))) {
+                $compText = $compOutput -join "`n"
                 $existing = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue } else { '' }
                 if ($existing -and -not $existing.EndsWith("`n")) { $existing += "`n" }
-                "$existing$compHeader`n$compOutput`n" | Out-File $PROFILE -Encoding UTF8
+                "$existing$compHeader`n$compText`n" | Out-File $PROFILE -Encoding UTF8
                 Write-Ok "Installed PowerShell completions to $PROFILE"
             }
         }
