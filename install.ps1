@@ -53,7 +53,10 @@ function try-winget-install {
         }
         if (Test-Path $wingetSettingsDir) {
             $settingsFile = Join-Path $wingetSettingsDir 'settings.json'
-            $wingetSettings = @{ visual = @{ progressBar = 'disabled' } } | ConvertTo-Json -Depth 3
+            $wingetSettings = @{
+                visual = @{ progressBar = 'disabled' }
+                experimentalFeatures = @{ localManifestFiles = $true }
+            } | ConvertTo-Json -Depth 3
             $wingetSettings | Out-File $settingsFile -Encoding UTF8 -ErrorAction SilentlyContinue
         }
     }
