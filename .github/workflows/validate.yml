@@ -164,6 +164,7 @@ jobs:
                     Write-Host "FAIL: PM was attempted despite -NoPkg"
                     exit 1
                   }
+                  $env:PATH = "$env:LOCALAPPDATA\Programs\pinner;$env:PATH"
                   pinner --version
 
             - name: CI=1 env var
@@ -171,6 +172,7 @@ jobs:
               run: |
                   $env:CI = '1'
                   ./install.ps1
+                  $env:PATH = "$env:LOCALAPPDATA\Programs\pinner;$env:PATH"
                   pinner --version
 
     test-sh-routing:
