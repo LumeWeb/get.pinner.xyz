@@ -65,17 +65,20 @@ jobs:
                   export PATH="$HOME/.local/bin:$PATH"
                   pinner --version
 
-    test-windows:
+    test-windows-binary:
         runs-on: windows-latest
         steps:
             - uses: actions/checkout@v5
-
-            - name: Smoke test - default install
+            - name: Default install (binary route)
               shell: pwsh
               run: |
                   ./install.ps1
                   pinner --version
 
+    test-windows-winget:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
             - name: CI mode - winget manifest fixture
               shell: pwsh
               run: |
@@ -87,6 +90,10 @@ jobs:
                   }
                   pinner --version
 
+    test-windows-scoop:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
             - name: CI mode - scoop manifest fixture
               shell: pwsh
               run: |
@@ -98,6 +105,10 @@ jobs:
                   }
                   pinner --version
 
+    test-windows-multi-pm:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
             - name: CI mode - both manifest fixtures
               shell: pwsh
               run: |
@@ -107,6 +118,10 @@ jobs:
                   ./install.ps1
                   pinner --version
 
+    test-windows-routing:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
             - name: -NoPkg skips PM detection
               shell: pwsh
               run: |
