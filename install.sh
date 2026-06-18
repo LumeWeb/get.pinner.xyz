@@ -618,12 +618,12 @@ try_pkg_install() {
         return 1
     fi
     if [ "$(id -u)" = 0 ]; then
-        if ! "$_install_cmd" $_install_arg "$_pkg_file" 2> /dev/null; then
+        if ! "$_install_cmd" "$_install_arg" "$_pkg_file" 2> /dev/null; then
             warn "$_pm_cmd install failed. Falling back to binary install."
             return 1
         fi
     else
-        if ! sudo "$_install_cmd" $_install_arg "$_pkg_file" 2> /dev/null; then
+        if ! sudo "$_install_cmd" "$_install_arg" "$_pkg_file" 2> /dev/null; then
             warn "$_pm_cmd install failed. Falling back to binary install."
             return 1
         fi
