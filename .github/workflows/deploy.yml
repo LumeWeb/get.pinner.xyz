@@ -1,0 +1,43 @@
+name: Deploy get.pinner.xyz
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - "install.sh"
+      - "install.ps1"
+      - "version"
+      - "_redirects"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+permissions:
+  deployments: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy get.pinner.xyz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      - name: Build dist
+        run: |
+          mkdir -p dist
+          cp install.sh dist/
+          cp install.ps1 dist/
+          cp version dist/
+          cp _redirects dist/
+
+      - name: Deploy to IPFS via Pinner
+        id: deploy_pinner
+        uses: lumeweb/pinner-deploy-action@v0
+        with:
+          api-key: ${{ secrets.PINNER_API_KEY }}
+          path: dist
+          domain: get.pinner.xyz
+          remove-previous: true
