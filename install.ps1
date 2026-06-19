@@ -32,6 +32,27 @@ function Write-Warn($Msg) { Write-Host "[warn]  $Msg" -ForegroundColor Yellow }
 function Write-Err($Msg)  { Write-Host "[error] $Msg" -ForegroundColor Red }
 function Write-Ok($Msg)   { Write-Host "[ok]    $Msg" -ForegroundColor Green }
 
+function Test-NewInstall {
+    $configDir = Join-Path $env:USERPROFILE '.config\pinner'
+    $configFile = Join-Path $configDir 'config.yaml'
+    -not (Test-Path $configFile)
+}
+
+function Show-NextSteps {
+    if (Get-Command $Script:ProgramName -ErrorAction SilentlyContinue) {
+        if (Test-NewInstall) {
+            Write-Info "First time? Run 'pinner setup' to configure authentication and settings."
+        } else {
+            Write-Info "Run 'pinner --help' to get started."
+        }
+    } else {
+        Write-Info "Open a new terminal to use pinner."
+        if (Test-NewInstall) {
+            Write-Info "Then run 'pinner setup' for first-time configuration."
+        }
+    }
+}
+
 function New-TempDir {
     try {
         $tmp = New-Item -Path $env:TEMP -Name "pinner-install-$(Get-Random)" -ItemType Directory -Force
@@ -46,8 +67,8 @@ function Invoke-PMInstall {
     param([string]$Name, [scriptblock]$Action, [string]$SuccessMsg, [string]$AlreadyInstalledMsg)
     try {
         & $Action
-        if ($LASTEXITCODE -eq 0) { Write-Ok $SuccessMsg; exit 0 }
-        if ($AlreadyInstalledMsg -and $LASTEXITCODE -eq -1966105625) { Write-Ok $AlreadyInstalledMsg; exit 0 }
+        if ($LASTEXITCODE -eq 0) { Write-Ok $SuccessMsg; Show-NextSteps; exit 0 }
+        if ($AlreadyInstalledMsg -and $LASTEXITCODE -eq -1966105625) { Write-Ok $AlreadyInstalledMsg; Show-NextSteps; exit 0 }
         Write-Warn "$Name install failed (exit code $LASTEXITCODE). Falling back..."
     } catch {
         Write-Warn "$Name install failed: $_. Falling back..."
@@ -301,7 +322,7 @@ try {
 
     Write-Host ''
     Write-Ok "Pinner CLI v$Version installed successfully!"
-    Write-Info "Run 'pinner --help' to get started."
+    Show-NextSteps
 } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }

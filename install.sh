@@ -563,6 +563,30 @@ detect_existing() {
     fi
 }
 
+# Check if this is a first-time install (no config file exists yet)
+is_new_install() {
+    _config_dir="${HOME}/.config/pinner"
+    [ ! -f "${_config_dir}/config.yaml" ]
+}
+
+# Show post-install next-steps guidance
+show_next_steps() {
+    if check_cmd "$PROGRAM_NAME"; then
+        if is_new_install; then
+            printf '\n'
+            info "First time? Run 'pinner setup' to configure authentication and settings."
+        else
+            info "Run 'pinner --help' to get started."
+        fi
+    else
+        printf '\n'
+        info "Run 'source ${RC_FILE}' or start a new shell to use pinner."
+        if is_new_install; then
+            info "Then run 'pinner setup' for first-time configuration."
+        fi
+    fi
+}
+
 # --- Package manager install -------------------------------------------------
 
 try_homebrew_install() {
@@ -587,6 +611,7 @@ try_homebrew_install() {
     if brew list "$PINNER_BREW_FORMULA" 2>/dev/null; then
         info "$PINNER_BREW_FORMULA is already installed via Homebrew."
         completed "Pinner CLI installed via Homebrew."
+        show_next_steps
         return 0
     fi
     if ! brew install "$PINNER_BREW_FORMULA"; then
@@ -594,6 +619,7 @@ try_homebrew_install() {
         return 1
     fi
     completed "Pinner CLI installed via Homebrew."
+    show_next_steps
     return 0
 }
 
@@ -629,6 +655,7 @@ try_pkg_install() {
         fi
     fi
     completed "Pinner CLI installed via $_pm_cmd."
+    show_next_steps
     return 0
 }
 
@@ -809,12 +836,7 @@ main() {
     # Success
     printf '\n'
     completed "Pinner CLI v${VERSION} installed successfully!"
-    if ! check_cmd "$PROGRAM_NAME"; then
-        printf '\n'
-        info "Run 'source ${RC_FILE}' or start a new shell to use pinner."
-    else
-        info "Run 'pinner --help' to get started."
-    fi
+    show_next_steps
 }
 
 main "$@"
