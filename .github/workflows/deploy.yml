@@ -8,7 +8,6 @@ on:
       - "install.sh"
       - "install.ps1"
       - "version"
-      - "_redirects"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
@@ -28,10 +27,10 @@ jobs:
       - name: Build dist
         run: |
           mkdir -p dist
+          cp install.sh dist/index.html
           cp install.sh dist/
           cp install.ps1 dist/
           cp version dist/
-          cp _redirects dist/
 
       - name: Deploy to IPFS via Pinner
         id: deploy_pinner
