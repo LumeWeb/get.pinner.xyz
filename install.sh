@@ -13,7 +13,7 @@ REPO="LumeWeb/pinner-cli"
 BASE_URL="https://github.com/${REPO}/releases/download"
 VERSION_URL="https://get.pinner.xyz/version"
 
-# ─── Shell compatibility guard ───────────────────────────────────────────────
+# --- Shell compatibility guard -----------------------------------------------
 
 if [ -n "${ZSH_VERSION+x}" ]; then
     echo "Error: Running with zsh is not supported. Please use sh." >&2
@@ -22,7 +22,7 @@ elif [ -n "${BASH_VERSION+x}" ] && [ -z "${POSIXLY_CORRECT+x}" ]; then
     echo "Warning: Running with non-POSIX bash may cause issues. Please use sh." >&2
 fi
 
-# ─── Globals ─────────────────────────────────────────────────────────────────
+# --- Globals -----------------------------------------------------------------
 
 INSTALL_DIR=""
 OPT_SYSTEM=0
@@ -43,7 +43,7 @@ BREW_PACKAGE="lumeweb/tap/pinner"
 PINNER_BREW_TAP="${PINNER_BREW_TAP:-}"
 PINNER_BREW_FORMULA="${PINNER_BREW_FORMULA:-$BREW_PACKAGE}"
 
-# ─── Helper functions ────────────────────────────────────────────────────────
+# --- Helper functions --------------------------------------------------------
 
 info() {
     printf '\033[1;34m[info]\033[0m  %s\n' "$1"
@@ -83,7 +83,7 @@ ignore() {
     "$@" 2> /dev/null || true
 }
 
-# ─── Download abstraction ────────────────────────────────────────────────────
+# --- Download abstraction ----------------------------------------------------
 
 curl_is_snap() {
     _curl_path="$(command -v curl 2> /dev/null || true)"
@@ -131,7 +131,7 @@ download_or_warn() {
     return 0
 }
 
-# ─── Platform detection ──────────────────────────────────────────────────────
+# --- Platform detection ------------------------------------------------------
 
 detect_platform() {
     _os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -180,7 +180,7 @@ check_32bit() {
     fi
 }
 
-# ─── Version detection ───────────────────────────────────────────────────────
+# --- Version detection -------------------------------------------------------
 
 fetch_url() {
     if check_cmd curl; then
@@ -223,7 +223,7 @@ get_latest_version() {
     printf '%s' "$_ver"
 }
 
-# ─── SHA256 verification ─────────────────────────────────────────────────────
+# --- SHA256 verification -----------------------------------------------------
 
 compute_sha256() {
     _file="$1"
@@ -258,7 +258,7 @@ verify_checksum() {
     fi
 }
 
-# ─── Install directory ───────────────────────────────────────────────────────
+# --- Install directory -------------------------------------------------------
 
 default_install_dir() {
     printf '%s' "${HOME}/.local/bin"
@@ -303,7 +303,7 @@ elevate_priv() {
     exit 1
 }
 
-# ─── PATH configuration ──────────────────────────────────────────────────────
+# --- PATH configuration ------------------------------------------------------
 
 detect_shell() {
     _shell="$(printf '%s' "${SHELL:-}" | sed 's|.*/||')"
@@ -360,7 +360,7 @@ configure_path() {
     info "Run 'source $_rc' or start a new shell to update your PATH."
 }
 
-# ─── Shell completions ───────────────────────────────────────────────────────
+# --- Shell completions -------------------------------------------------------
 
 install_completions() {
     _extract_dir="$1"
@@ -406,7 +406,7 @@ install_completions() {
     fi
 }
 
-# ─── Uninstall ───────────────────────────────────────────────────────────────
+# --- Uninstall ---------------------------------------------------------------
 
 uninstall() {
     _dir="$1"
@@ -448,7 +448,7 @@ uninstall() {
     exit 0
 }
 
-# ─── Flag parsing ────────────────────────────────────────────────────────────
+# --- Flag parsing ------------------------------------------------------------
 
 usage() {
     cat <<EOF
@@ -532,7 +532,7 @@ parse_flags() {
     done
 }
 
-# ─── Edge case detection ─────────────────────────────────────────────────────
+# --- Edge case detection -----------------------------------------------------
 
 detect_wsl() {
     if [ -f /proc/version ]; then
@@ -563,7 +563,7 @@ detect_existing() {
     fi
 }
 
-# ─── Package manager install ─────────────────────────────────────────────────
+# --- Package manager install -------------------------------------------------
 
 try_homebrew_install() {
     if [ "$(id -u)" = 0 ]; then
@@ -640,7 +640,7 @@ try_rpm_install() {
     try_pkg_install rpm rpm rpm "-i"
 }
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# --- Main --------------------------------------------------------------------
 
 main() {
     parse_flags "$@"
