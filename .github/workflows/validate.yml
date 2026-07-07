@@ -122,8 +122,10 @@ jobs:
               run: |
                   $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
                   $env:CI = 'true'
+                  # Point winget manifest to a non-existent path so it fails fast,
+                  # forcing the script to fall through to scoop.
+                  $env:PINNER_WINGET_MANIFEST = 'C:\nonexistent\winget-manifest'
                   $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
-                  # winget is tried first and will fail, then scoop should be attempted
                   $output = ./install.ps1 *>&1 | Out-String
                   if ($output -match 'CI mode: installing from local manifest.*scoop') {
                     Write-Host "PASS: Scoop manifest path reached"
