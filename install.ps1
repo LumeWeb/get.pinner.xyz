@@ -234,7 +234,7 @@ function Find-RunBySha {
 
 function Build-SnapshotUrl {
     param([string]$Ref)
-    if (Test-GitHash -Hash $Ref) {
+    if (Test-GitHash -Ver $Ref) {
         # Resolve short hashes to full 40-char SHA
         if ($Ref.Length -lt 40) {
             $full = Resolve-FullSha -ShortSha $Ref
