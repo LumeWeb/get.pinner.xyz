@@ -207,63 +207,68 @@ function Test-SemVer {
 
 $Script:ActionsApi = "https://api.github.com/repos/$Script:Repo/actions"
 $Script:ArtifactName = 'pinner-cli-snapshot'
+$Script:NightlyLink = 'https://nightly.link'
+$Script:WorkflowFile = 'go.yml'
 
-function Find-WorkflowRun {
-    param([string]$Ref)
-    # Try by head_sha first (commit hashes)
+function Resolve-FullSha {
+    param([string]$ShortSha)
     try {
-        $url = "$Script:ActionsApi/runs?per_page=10&head_sha=$Ref&status=success"
+        $url = "https://api.github.com/repos/$Script:Repo/commits/$ShortSha"
         $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Accept' = 'application/vnd.github+json' }
-        $runs = ($resp.Content | ConvertFrom-Json).workflow_runs
-        if ($runs) { return $runs[0].id }
+        $sha = ($resp.Content | ConvertFrom-Json).sha
+        if ($sha) { return $sha }
     } catch { }
-
-    # Fall back to branch filter (branch names)
-    try {
-        $url = "$Script:ActionsApi/runs?per_page=10&branch=$Ref&status=success"
-        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Accept' = 'application/vnd.github+json' }
-        $runs = ($resp.Content | ConvertFrom-Json).workflow_runs
-        if ($runs) { return $runs[0].id }
-    } catch { }
-
     return $null
 }
 
-function Find-ArtifactUrl {
-    param([string]$RunId)
+function Find-RunBySha {
+    param([string]$Sha)
     try {
-        $url = "$Script:ActionsApi/runs/$RunId/artifacts?per_page=100"
+        $url = "$Script:ActionsApi/runs?per_page=10&head_sha=$Sha&status=success"
         $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Accept' = 'application/vnd.github+json' }
-        $artifacts = ($resp.Content | ConvertFrom-Json).artifacts
-        $artifact = $artifacts | Where-Object { $_.name -eq $Script:ArtifactName } | Select-Object -First 1
-        if ($artifact) { return $artifact.archive_download_url }
+        $runs = ($resp.Content | ConvertFrom-Json).workflow_runs
+        if ($runs) { return $runs[0].id }
     } catch { }
     return $null
+}
+
+function Build-SnapshotUrl {
+    param([string]$Ref)
+    if (Test-GitHash -Hash $Ref) {
+        # Resolve short hashes to full 40-char SHA
+        if ($Ref.Length -lt 40) {
+            $full = Resolve-FullSha -ShortSha $Ref
+            if (-not $full) {
+                Write-Err "Could not resolve commit hash '$Ref'."
+                exit 1
+            }
+            $Ref = $full
+        }
+        $runId = Find-RunBySha -Sha $Ref
+        if (-not $runId) {
+            Write-Err "No successful CI run found for commit '$Ref'."
+            Write-Err 'Ensure a push to develop or PR has completed with artifacts.'
+            exit 1
+        }
+        Write-Info "Found workflow run #$runId"
+        return "$Script:NightlyLink/$Script:Repo/actions/runs/$runId/$Script:ArtifactName.zip"
+    } else {
+        # Branch name — construct nightly.link URL directly
+        return "$Script:NightlyLink/$Script:Repo/workflows/$Script:WorkflowFile/$Ref/$Script:ArtifactName.zip"
+    }
 }
 
 function Download-SnapshotArtifact {
     param([string]$Ref, [string]$TmpDir, [string]$Arch)
 
     Write-Info "Looking up CI snapshot for $Ref..."
-    $runId = Find-WorkflowRun -Ref $Ref
-    if (-not $runId) {
-        Write-Err "No successful CI run found for '$Ref'."
-        Write-Err 'Ensure a push to develop or PR has completed with artifacts.'
-        exit 1
-    }
-    Write-Info "Found workflow run #$runId"
+    $url = Build-SnapshotUrl -Ref $Ref
 
-    $artifactUrl = Find-ArtifactUrl -RunId $runId
-    if (-not $artifactUrl) {
-        Write-Err "No snapshot artifact found in run #$runId."
-        exit 1
-    }
-
-    # Download the artifact ZIP (GitHub redirects to storage URL)
+    # Download via nightly.link — no auth required
     $outerZip = Join-Path $TmpDir 'snapshot-artifact.zip'
     Write-Info 'Downloading snapshot artifact...'
     try {
-        Invoke-WebRequest -Uri $artifactUrl -OutFile $outerZip -UseBasicParsing -TimeoutSec 300 -Headers @{ 'Accept' = 'application/vnd.github+json' }
+        Invoke-WebRequest -Uri $url -OutFile $outerZip -UseBasicParsing -TimeoutSec 300
     } catch {
         Write-Err "Failed to download artifact: $_"
         exit 1
@@ -278,11 +283,8 @@ function Download-SnapshotArtifact {
     $pattern = "$($Script:ArchiveName)_*_windows_$Arch"
     $innerArchive = Get-ChildItem -Path $artifactDir -Recurse -Filter "$pattern.zip" | Select-Object -First 1
     if (-not $innerArchive) {
-        $innerArchive = Get-ChildItem -Path $artifactDir -Recurse -Filter "$pattern.tar.gz" | Select-Object -First 1
-    }
-    if (-not $innerArchive) {
         Write-Err "No archive found for windows/$Arch in snapshot artifact."
-        Write-Err "Expected: $pattern.zip or .tar.gz"
+        Write-Err "Expected: $pattern.zip"
         exit 1
     }
 

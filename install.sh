@@ -38,6 +38,7 @@ RC_FILE=""
 # GitHub Actions API for snapshot artifacts (commit hash / branch downloads)
 ACTIONS_API="https://api.github.com/repos/${REPO}/actions"
 ARTIFACT_NAME="pinner-cli-snapshot"
+WORKFLOW_FILE="go.yml"
 
 # Directory of this script (for CI local version file fallback)
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2> /dev/null && pwd || echo .)"
@@ -253,88 +254,84 @@ is_semver() {
 
 # --- Snapshot artifact download (for git hash / branch targets) ----------------
 
-# Fetch JSON from the GitHub Actions API
+# nightly.link provides public, no-auth download links for GitHub Actions artifacts.
+# URL formats:
+#   Branch:  https://nightly.link/<owner>/<repo>/workflows/<workflow>/<branch>/<artifact>.zip
+#   Run ID:  https://nightly.link/<owner>/<repo>/actions/runs/<run_id>/<artifact>.zip
+NIGHTLY_LINK="https://nightly.link"
+
+# Fetch JSON from the GitHub Actions API (still needed to resolve run IDs for hashes)
 gh_api() {
     _url="$1"
     fetch_url "$_url"
 }
 
-# Find a successful workflow run for a given commit SHA or branch name.
-# Prints the run ID.
-find_workflow_run() {
-    _ref="$1"
-    # Try by head_sha first (works for commit hashes)
-    _json="$(gh_api "${ACTIONS_API}/runs?per_page=10&head_sha=${_ref}&status=success")"
-    _run_id="$(printf '%s' "$_json" | grep '"id"' | head -n1 | sed 's/[^0-9]//g')"
-    if [ -n "$_run_id" ]; then
-        printf '%s' "$_run_id"
-        return 0
-    fi
-
-    # Fall back to branch filter (works for branch names)
-    _json="$(gh_api "${ACTIONS_API}/runs?per_page=10&branch=${_ref}&status=success")"
-    _run_id="$(printf '%s' "$_json" | grep '"id"' | head -n1 | sed 's/[^0-9]//g')"
-    if [ -n "$_run_id" ]; then
-        printf '%s' "$_run_id"
-        return 0
-    fi
-
-    return 1
+# Resolve a short git hash to a full 40-char SHA via the GitHub commits API.
+# Prints the full SHA, or empty on failure.
+resolve_full_sha() {
+    _short="$1"
+    gh_api "https://api.github.com/repos/${REPO}/commits/${_short}" \
+        | grep '"sha"' | head -n1 \
+        | sed 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
 }
 
-# Find the snapshot artifact download URL from a workflow run ID.
-# Prints the artifact download URL.
-find_artifact_url() {
-    _run_id="$1"
-    _json="$(gh_api "${ACTIONS_API}/runs/${_run_id}/artifacts?per_page=100")"
-    # Find the artifact with our name and extract its archive_download_url
-    # The JSON structure is: {"artifacts": [{"name": "...", "archive_download_url": "..."}]}
-    # Use a simple approach: find the archive_download_url that follows our artifact name
-    _artifact_line="$(printf '%s' "$_json" | grep -A5 "\"${ARTIFACT_NAME}\"" | grep '"archive_download_url"' | head -n1)"
-    if [ -n "$_artifact_line" ]; then
-        printf '%s' "$_artifact_line" | sed 's/.*"archive_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
-        return 0
+# Find a successful workflow run ID for a given commit SHA.
+# Uses the Actions API (head_sha requires full 40-char SHA).
+# Prints the run ID, or empty on failure.
+find_run_by_sha() {
+    _sha="$1"
+    _json="$(gh_api "${ACTIONS_API}/runs?per_page=10&head_sha=${_sha}&status=success")"
+    printf '%s' "$_json" | grep '"id"' | head -n1 | sed 's/[^0-9]//g'
+}
+
+# Build the nightly.link download URL for a given ref (hash or branch).
+# Prints the URL.
+build_snapshot_url() {
+    _ref="$1"
+    if is_git_hash "$_ref"; then
+        # Resolve short hashes to full 40-char SHA
+        if [ "${#_ref}" -lt 40 ]; then
+            _full="$(resolve_full_sha "$_ref")"
+            if [ -z "$_full" ]; then
+                error "Could not resolve commit hash '${_ref}'."
+                exit 1
+            fi
+            _ref="$_full"
+        fi
+        _run_id="$(find_run_by_sha "$_ref")"
+        if [ -z "$_run_id" ]; then
+            error "No successful CI run found for commit '${_ref}'."
+            error "Ensure a push to develop or PR has completed with artifacts."
+            exit 1
+        fi
+        info "Found workflow run #${_run_id}"
+        printf '%s' "${NIGHTLY_LINK}/${REPO}/actions/runs/${_run_id}/${ARTIFACT_NAME}.zip"
+    else
+        # Branch name — construct nightly.link URL directly
+        printf '%s' "${NIGHTLY_LINK}/${REPO}/workflows/${WORKFLOW_FILE}/${_ref}/${ARTIFACT_NAME}.zip"
     fi
-    # Fallback: if no named artifact found, try first archive_download_url
-    printf '%s' "$_json" | \
-        sed -n '/"archive_download_url"/{ s/.*"archive_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/; p; }' | \
-        head -n1
 }
 
 # Download and extract a snapshot artifact for the current platform/arch.
-# Sets _archive to the path of the extracted inner archive.
+# Prints the path of the extracted inner archive.
 download_snapshot_artifact() {
     _ref="$1"
     _tmpdir="$2"
 
     info "Looking up CI snapshot for ${_ref}..."
-    _run_id="$(find_workflow_run "$_ref")"
-    if [ -z "$_run_id" ]; then
-        error "No successful CI run found for '${_ref}'."
-        error "Ensure a push to develop or PR has completed with artifacts."
-        exit 1
-    fi
-    info "Found workflow run #${_run_id}"
+    _url="$(build_snapshot_url "$_ref")"
 
-    _artifact_url="$(find_artifact_url "$_run_id")"
-    if [ -z "$_artifact_url" ]; then
-        error "No snapshot artifact found in run #${_run_id}."
-        exit 1
-    fi
-
-    # GitHub Actions artifact downloads require acceptance header, redirect to storage
+    # Download via nightly.link — no auth required
     _outer_zip="${_tmpdir}/snapshot-artifact.zip"
     info "Downloading snapshot artifact..."
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
         curl --fail --silent --location $(curl_tls_flags) \
             --connect-timeout 30 --max-time 300 \
-            --header "Accept: application/vnd.github+json" \
-            --output "$_outer_zip" "$_artifact_url"
+            --output "$_outer_zip" "$_url"
     elif check_cmd wget; then
         wget --quiet --timeout=30 \
-            --header="Accept: application/vnd.github+json" \
-            --output-document="$_outer_zip" "$_artifact_url"
+            --output-document="$_outer_zip" "$_url"
     else
         error "No download tool found (curl or wget required)."
         exit 1
