@@ -11,6 +11,7 @@ param(
     [switch]$Uninstall,
     [switch]$NoPkg,
     [switch]$CI,
+    [string]$Version,
     [switch]$Help
 )
 
@@ -146,6 +147,7 @@ Flags:
   -System       Install to Program Files (requires admin)
   -Uninstall    Remove pinner CLI
   -NoPkg        Skip package manager detection (winget/scoop)
+  -Version VER  Target version: semver (0.2.0), git hash (abc1234), or branch (develop)
   -CI           Enable CI mode (also activated by CI=true env var)
   -Help         Show this help message
   -Debug        Enable verbose output
@@ -184,6 +186,109 @@ function Get-LatestVersion {
     }
     Write-Err 'Could not determine the latest version.'
     exit 1
+}
+
+# ── Version type detection ──────────────────────────────────────────────────
+
+function Test-GitHash {
+    param([string]$Ver)
+    if ($Ver -match '^[0-9a-fA-F]{7,40}$') { return $true }
+    return $false
+}
+
+function Test-SemVer {
+    param([string]$Ver)
+    $cleaned = $Ver -replace '^v', ''
+    if ($cleaned -match '^\d+\.\d+\.\d+') { return $true }
+    return $false
+}
+
+# ── Snapshot artifact download (for git hash / branch targets) ───────────────
+
+$Script:ActionsApi = "https://api.github.com/repos/$Script:Repo/actions"
+$Script:ArtifactName = 'pinner-cli-snapshot'
+$Script:NightlyLink = 'https://nightly.link'
+$Script:WorkflowFile = 'go.yml'
+
+function Resolve-FullSha {
+    param([string]$ShortSha)
+    try {
+        $url = "https://api.github.com/repos/$Script:Repo/commits/$ShortSha"
+        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Accept' = 'application/vnd.github+json' }
+        $sha = ($resp.Content | ConvertFrom-Json).sha
+        if ($sha) { return $sha }
+    } catch { }
+    return $null
+}
+
+function Find-RunBySha {
+    param([string]$Sha)
+    try {
+        $url = "$Script:ActionsApi/runs?per_page=10&head_sha=$Sha&status=success"
+        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Accept' = 'application/vnd.github+json' }
+        $runs = ($resp.Content | ConvertFrom-Json).workflow_runs
+        if ($runs) { return $runs[0].id }
+    } catch { }
+    return $null
+}
+
+function Build-SnapshotUrl {
+    param([string]$Ref)
+    if (Test-GitHash -Ver $Ref) {
+        # Resolve short hashes to full 40-char SHA
+        if ($Ref.Length -lt 40) {
+            $full = Resolve-FullSha -ShortSha $Ref
+            if (-not $full) {
+                Write-Err "Could not resolve commit hash '$Ref'."
+                exit 1
+            }
+            $Ref = $full
+        }
+        $runId = Find-RunBySha -Sha $Ref
+        if (-not $runId) {
+            Write-Err "No successful CI run found for commit '$Ref'."
+            Write-Err 'Ensure a push to develop or PR has completed with artifacts.'
+            exit 1
+        }
+        Write-Info "Found workflow run #$runId"
+        return "$Script:NightlyLink/$Script:Repo/actions/runs/$runId/$Script:ArtifactName.zip"
+    } else {
+        # Branch name — construct nightly.link URL directly
+        return "$Script:NightlyLink/$Script:Repo/workflows/$Script:WorkflowFile/$Ref/$Script:ArtifactName.zip"
+    }
+}
+
+function Download-SnapshotArtifact {
+    param([string]$Ref, [string]$TmpDir, [string]$Arch)
+
+    Write-Info "Looking up CI snapshot for $Ref..."
+    $url = Build-SnapshotUrl -Ref $Ref
+
+    # Download via nightly.link — no auth required
+    $outerZip = Join-Path $TmpDir 'snapshot-artifact.zip'
+    Write-Info 'Downloading snapshot artifact...'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $outerZip -UseBasicParsing -TimeoutSec 300
+    } catch {
+        Write-Err "Failed to download artifact: $_"
+        exit 1
+    }
+
+    # Extract outer ZIP (contains dist/ directory from GoReleaser)
+    Write-Info 'Extracting artifact...'
+    $artifactDir = Join-Path $TmpDir 'artifact'
+    Expand-Archive -Path $outerZip -DestinationPath $artifactDir -Force
+
+    # Find the inner archive for windows / current arch
+    $pattern = "$($Script:ArchiveName)_*_windows_$Arch"
+    $innerArchive = Get-ChildItem -Path $artifactDir -Recurse -Filter "$pattern.zip" | Select-Object -First 1
+    if (-not $innerArchive) {
+        Write-Err "No archive found for windows/$Arch in snapshot artifact."
+        Write-Err "Expected: $pattern.zip"
+        exit 1
+    }
+
+    return $innerArchive.FullName
 }
 
 function Get-InstallDir {
@@ -232,14 +337,34 @@ if ($Uninstall) {
 
 # ── Main install ───────────────────────────────────────────────────────────
 
-if (-not $NoPkg) {
+# Version resolution: -Version flag > PINNER_VERSION env > latest endpoint
+$requestedVersion = if ($Version) { $Version } elseif ($env:PINNER_VERSION) { $env:PINNER_VERSION } else { $null }
+$useSnapshot = $false
+
+if ($requestedVersion) {
+    if (Test-SemVer -Ver $requestedVersion) {
+        $resolvedVersion = $requestedVersion -replace '^v', ''
+    } elseif (Test-GitHash -Ver $requestedVersion) {
+        $resolvedVersion = $requestedVersion
+        $useSnapshot = $true
+    } else {
+        # Treat as branch name
+        $resolvedVersion = $requestedVersion
+        $useSnapshot = $true
+    }
+} else {
+    $resolvedVersion = Get-LatestVersion
+}
+
+# Skip package manager install for snapshot builds
+if (-not $useSnapshot -and -not $NoPkg) {
     try-winget-install
     try-scoop-install
     Write-Info 'No supported package manager found. Falling back to binary download.'
 }
 
 $Arch = Get-Arch
-$Version = Get-LatestVersion
+$Version = $resolvedVersion
 $InstallDir = Get-InstallDir
 
 Write-Info "Installing Pinner CLI v$Version for windows/$Arch"
@@ -253,38 +378,46 @@ if (Test-Path $existingBinary) {
     } catch { Write-Info 'Replacing existing installation.' }
 }
 
-$archiveFileName = "$Script:ArchiveName`_$Version`_windows_$Arch.zip"
-$archiveUrl = "$Script:BaseUrl/v$Version/$archiveFileName"
-$checksumsUrl = "$Script:BaseUrl/v$Version/checksums.txt"
-
-Write-Verbose "Checking connectivity to $archiveUrl"
-try { Invoke-WebRequest -Uri $archiveUrl -Method Head -UseBasicParsing -TimeoutSec 15 | Out-Null }
-catch {
-    Write-Err "Cannot reach $archiveUrl"
-    Write-Err 'Check your network connection and that the version/architecture is correct.'
-    exit 1
-}
-
 $tmpDir = New-TempDir
 try {
-    $archivePath = Join-Path $tmpDir $archiveFileName
-    $checksumsPath = Join-Path $tmpDir 'checksums.txt'
+    if ($useSnapshot) {
+        # Download snapshot artifact from GitHub Actions API
+        $archivePath = Download-SnapshotArtifact -Ref $Version -TmpDir $tmpDir -Arch $Arch
+        $archiveFileName = Split-Path $archivePath -Leaf
+        Write-Info "Downloaded $archiveFileName"
+    } else {
+        # Download from GitHub Releases
+        $archiveFileName = "$Script:ArchiveName`_$Version`_windows_$Arch.zip"
+        $archiveUrl = "$Script:BaseUrl/v$Version/$archiveFileName"
+        $checksumsUrl = "$Script:BaseUrl/v$Version/checksums.txt"
 
-    Write-Info "Downloading $archiveFileName..."
-    Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
-    Write-Info 'Downloading checksums...'
-    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+        Write-Verbose "Checking connectivity to $archiveUrl"
+        try { Invoke-WebRequest -Uri $archiveUrl -Method Head -UseBasicParsing -TimeoutSec 15 | Out-Null }
+        catch {
+            Write-Err "Cannot reach $archiveUrl"
+            Write-Err 'Check your network connection and that the version/architecture is correct.'
+            exit 1
+        }
 
-    Write-Info 'Verifying SHA256 checksum...'
-    $checksums = Get-Content $checksumsPath -Raw
-    $expectedLine = $checksums -split "`n" | Where-Object { $_ -match [regex]::Escape($archiveFileName) }
-    if (-not $expectedLine) { Write-Err "Could not find checksum for $archiveFileName"; exit 1 }
-    $expectedHash = ($expectedLine -split '\s+')[0].Trim()
-    $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
-    if ($expectedHash.ToLower() -ne $actualHash) {
-        Write-Err 'SHA256 verification failed!'; Write-Err "  Expected: $expectedHash"; Write-Err "  Actual:   $actualHash"; exit 1
+        $archivePath = Join-Path $tmpDir $archiveFileName
+        $checksumsPath = Join-Path $tmpDir 'checksums.txt'
+
+        Write-Info "Downloading $archiveFileName..."
+        Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
+        Write-Info 'Downloading checksums...'
+        Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+
+        Write-Info 'Verifying SHA256 checksum...'
+        $checksums = Get-Content $checksumsPath -Raw
+        $expectedLine = $checksums -split "`n" | Where-Object { $_ -match [regex]::Escape($archiveFileName) }
+        if (-not $expectedLine) { Write-Err "Could not find checksum for $archiveFileName"; exit 1 }
+        $expectedHash = ($expectedLine -split '\s+')[0].Trim()
+        $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
+        if ($expectedHash.ToLower() -ne $actualHash) {
+            Write-Err 'SHA256 verification failed!'; Write-Err "  Expected: $expectedHash"; Write-Err "  Actual:   $actualHash"; exit 1
+        }
+        Write-Ok 'Checksum verified.'
     }
-    Write-Ok 'Checksum verified.'
 
     Write-Info 'Extracting...'
     $extractDir = Join-Path $tmpDir 'extract'
