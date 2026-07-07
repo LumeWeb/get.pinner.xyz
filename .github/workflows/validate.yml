@@ -223,3 +223,70 @@ jobs:
                         echo "FAIL: PINNER_VERSION did not override version fetch"
                         exit 1
                       fi
+
+    test-version-targeting:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: Semver version targeting uses GitHub Releases path
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --version 0.2.0 --no-pkg --debug 2>&1 || true)
+                      # Should NOT attempt GitHub Actions API
+                      if echo "$output" | grep -qi "Looking up CI snapshot"; then
+                        echo "FAIL: Semver version triggered snapshot path"
+                        exit 1
+                      fi
+                      # Should attempt to download from GitHub Releases (will fail: no such release)
+                      if ! echo "$output" | grep -qi "Downloading pinner-cli_0.2.0"; then
+                        echo "FAIL: Did not attempt download for semver version"
+                        exit 1
+                      fi
+
+            - name: Git hash version targeting uses Actions API path
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --version abc1234 --no-pkg --debug 2>&1 || true)
+                      # Should attempt GitHub Actions API lookup
+                      if ! echo "$output" | grep -qi "Looking up CI snapshot"; then
+                        echo "FAIL: Git hash did not trigger snapshot path"
+                        exit 1
+                      fi
+
+            - name: Branch name version targeting uses Actions API path
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --version develop --no-pkg --debug 2>&1 || true)
+                      # Should attempt GitHub Actions API lookup
+                      if ! echo "$output" | grep -qi "Looking up CI snapshot"; then
+                        echo "FAIL: Branch name did not trigger snapshot path"
+                        exit 1
+                      fi
+
+            - name: --version flag takes priority over PINNER_VERSION env
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  env: |
+                      PINNER_VERSION=0.0.1
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      output=$(sh /workspace/install.sh --version 0.2.0 --no-pkg --debug 2>&1 || true)
+                      if echo "$output" | grep -qi "0.0.1"; then
+                        echo "FAIL: Env var took priority over --version flag"
+                        exit 1
+                      fi

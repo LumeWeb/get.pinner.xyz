@@ -31,8 +31,13 @@ OPT_BASE_URL=""
 OPT_UNINSTALL=0
 OPT_DEBUG=0
 OPT_NO_PKG=0
+OPT_VERSION=""
 DETECTED_SHELL=""
 RC_FILE=""
+
+# GitHub Actions API for snapshot artifacts (commit hash / branch downloads)
+ACTIONS_API="https://api.github.com/repos/${REPO}/actions"
+ARTIFACT_NAME="pinner-cli-snapshot"
 
 # Directory of this script (for CI local version file fallback)
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2> /dev/null && pwd || echo .)"
@@ -221,6 +226,149 @@ get_latest_version() {
     fi
 
     printf '%s' "$_ver"
+}
+
+# --- Version type detection ---------------------------------------------------
+
+# Returns 0 if the argument looks like a git commit hash (7-40 hex chars)
+is_git_hash() {
+    case "$1" in
+        *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    _len="${#1}"
+    [ "$_len" -ge 7 ] && [ "$_len" -le 40 ]
+}
+
+# Returns 0 if the argument looks like a semantic version (e.g. 0.2.0, v1.2.3)
+is_semver() {
+    case "$1" in
+        v*) _v="${1#v}" ;;
+        *)  _v="$1" ;;
+    esac
+    case "$_v" in
+        [0-9]*.[0-9]*.[0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# --- Snapshot artifact download (for git hash / branch targets) ----------------
+
+# Fetch JSON from the GitHub Actions API
+gh_api() {
+    _url="$1"
+    fetch_url "$_url"
+}
+
+# Find a successful workflow run for a given commit SHA or branch name.
+# Prints the run ID.
+find_workflow_run() {
+    _ref="$1"
+    # Try by head_sha first (works for commit hashes)
+    _json="$(gh_api "${ACTIONS_API}/runs?per_page=10&head_sha=${_ref}&status=success")"
+    _run_id="$(printf '%s' "$_json" | grep '"id"' | head -n1 | sed 's/[^0-9]//g')"
+    if [ -n "$_run_id" ]; then
+        printf '%s' "$_run_id"
+        return 0
+    fi
+
+    # Fall back to branch filter (works for branch names)
+    _json="$(gh_api "${ACTIONS_API}/runs?per_page=10&branch=${_ref}&status=success")"
+    _run_id="$(printf '%s' "$_json" | grep '"id"' | head -n1 | sed 's/[^0-9]//g')"
+    if [ -n "$_run_id" ]; then
+        printf '%s' "$_run_id"
+        return 0
+    fi
+
+    return 1
+}
+
+# Find the snapshot artifact download URL from a workflow run ID.
+# Prints the artifact download URL.
+find_artifact_url() {
+    _run_id="$1"
+    _json="$(gh_api "${ACTIONS_API}/runs/${_run_id}/artifacts?per_page=100")"
+    # Find the artifact with our name and extract its archive_download_url
+    # The JSON structure is: {"artifacts": [{"name": "...", "archive_download_url": "..."}]}
+    # Use a simple approach: find the archive_download_url that follows our artifact name
+    _artifact_line="$(printf '%s' "$_json" | grep -A5 "\"${ARTIFACT_NAME}\"" | grep '"archive_download_url"' | head -n1)"
+    if [ -n "$_artifact_line" ]; then
+        printf '%s' "$_artifact_line" | sed 's/.*"archive_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
+        return 0
+    fi
+    # Fallback: if no named artifact found, try first archive_download_url
+    printf '%s' "$_json" | \
+        sed -n '/"archive_download_url"/{ s/.*"archive_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/; p; }' | \
+        head -n1
+}
+
+# Download and extract a snapshot artifact for the current platform/arch.
+# Sets _archive to the path of the extracted inner archive.
+download_snapshot_artifact() {
+    _ref="$1"
+    _tmpdir="$2"
+
+    info "Looking up CI snapshot for ${_ref}..."
+    _run_id="$(find_workflow_run "$_ref")"
+    if [ -z "$_run_id" ]; then
+        error "No successful CI run found for '${_ref}'."
+        error "Ensure a push to develop or PR has completed with artifacts."
+        exit 1
+    fi
+    info "Found workflow run #${_run_id}"
+
+    _artifact_url="$(find_artifact_url "$_run_id")"
+    if [ -z "$_artifact_url" ]; then
+        error "No snapshot artifact found in run #${_run_id}."
+        exit 1
+    fi
+
+    # GitHub Actions artifact downloads require acceptance header, redirect to storage
+    _outer_zip="${_tmpdir}/snapshot-artifact.zip"
+    info "Downloading snapshot artifact..."
+    if check_cmd curl && ! curl_is_snap; then
+        # shellcheck disable=SC2046
+        curl --fail --silent --location $(curl_tls_flags) \
+            --connect-timeout 30 --max-time 300 \
+            --header "Accept: application/vnd.github+json" \
+            --output "$_outer_zip" "$_artifact_url"
+    elif check_cmd wget; then
+        wget --quiet --timeout=30 \
+            --header="Accept: application/vnd.github+json" \
+            --output-document="$_outer_zip" "$_artifact_url"
+    else
+        error "No download tool found (curl or wget required)."
+        exit 1
+    fi
+
+    # Extract outer ZIP (contains the dist/ directory from GoReleaser)
+    info "Extracting artifact..."
+    if check_cmd unzip; then
+        unzip -q -o "$_outer_zip" -d "${_tmpdir}/artifact"
+    elif check_cmd python3; then
+        python3 -c "import zipfile; zipfile.ZipFile('$_outer_zip').extractall('${_tmpdir}/artifact')"
+    else
+        error "Cannot extract ZIP: install unzip or python3."
+        exit 1
+    fi
+
+    # Find the inner archive for our platform/arch
+    _inner_pattern="${ARCHIVE_NAME}_*_$(detect_platform)_${ARCH}"
+    _inner_archive=""
+    for _ext in tar.gz zip; do
+        _found="$(find "${_tmpdir}/artifact" -name "${_inner_pattern}.${_ext}" -type f 2>/dev/null | head -n1)"
+        if [ -n "$_found" ]; then
+            _inner_archive="$_found"
+            break
+        fi
+    done
+
+    if [ -z "$_inner_archive" ]; then
+        error "No archive found for $(detect_platform)/${ARCH} in snapshot artifact."
+        error "Expected: ${ARCHIVE_NAME}_*_$(detect_platform)_${ARCH}.tar.gz or .zip"
+        exit 1
+    fi
+
+    printf '%s' "$_inner_archive"
 }
 
 # --- SHA256 verification -----------------------------------------------------
@@ -461,6 +609,7 @@ Flags:
   --system           Install to /usr/local/bin (requires sudo if not writable)
   --bin-dir DIR      Install to custom directory
   --arch ARCH        Override detected architecture (amd64 or arm64)
+  --version VER      Target version: semver (0.2.0), git hash (abc1234), or branch (develop)
   --base-url URL     Override download base URL (for testing)
   --no-pkg           Skip package manager detection (use binary install)
   --uninstall        Remove pinner CLI
@@ -469,7 +618,7 @@ Flags:
 
 Environment Variables:
   PINNER_INSTALL     Custom install directory (same as --bin-dir)
-  PINNER_VERSION     Override version (skips version fetch only; use --no-pkg to skip PM)
+  PINNER_VERSION     Override version (same as --version; semver, hash, or branch)
   PINNER_BREW_TAP    Local path to a Homebrew tap directory (CI mode)
   PINNER_BREW_FORMULA  Override brew formula name (default: lumeweb/tap/pinner)
 
@@ -478,6 +627,9 @@ Examples:
   curl -fsSL https://get.pinner.xyz | sh -s -- --system
   curl -fsSL https://get.pinner.xyz | sh -s -- --bin-dir ~/bin
   curl -fsSL https://get.pinner.xyz | sh -s -- --arch arm64
+  curl -fsSL https://get.pinner.xyz | sh -s -- --version 0.2.0
+  curl -fsSL https://get.pinner.xyz | sh -s -- --version abc1234
+  curl -fsSL https://get.pinner.xyz | sh -s -- --version develop
 EOF
 }
 
@@ -501,6 +653,13 @@ parse_flags() {
                 ;;
             --arch=*)
                 OPT_ARCH="${_flag#--arch=}"
+                ;;
+            --version)
+                shift
+                OPT_VERSION="${1:?--version requires a version argument}"
+                ;;
+            --version=*)
+                OPT_VERSION="${_flag#--version=}"
                 ;;
             --base-url)
                 shift
@@ -723,9 +882,21 @@ main() {
     detect_wsl
     detect_root
 
-    # Version: PINNER_VERSION override > version endpoint/file fallback
-    if [ -n "${PINNER_VERSION:-}" ]; then
-        VERSION="$PINNER_VERSION"
+    # Version resolution: --version flag > PINNER_VERSION env > latest endpoint
+    _requested_version="${OPT_VERSION:-${PINNER_VERSION:-}}"
+    _use_snapshot=0
+
+    if [ -n "$_requested_version" ]; then
+        if is_semver "$_requested_version"; then
+            VERSION="$(clean_version "$_requested_version")"
+        elif is_git_hash "$_requested_version"; then
+            VERSION="$_requested_version"
+            _use_snapshot=1
+        else
+            # Treat as branch name
+            VERSION="$_requested_version"
+            _use_snapshot=1
+        fi
     else
         VERSION="$(get_latest_version)"
     fi
@@ -735,8 +906,8 @@ main() {
     _tmpdir="$(mktemp -d)"
     trap 'rm -rf "$_tmpdir"' EXIT
 
-    # Try package manager install
-    if [ "$OPT_NO_PKG" = 0 ]; then
+    # Skip package manager install for snapshot builds
+    if [ "$_use_snapshot" = 0 ] && [ "$OPT_NO_PKG" = 0 ]; then
         if [ "$PLATFORM" = "darwin" ]; then
             if try_homebrew_install; then
                 exit 0
@@ -751,35 +922,60 @@ main() {
         fi
     fi
 
-    # Construct download URL
-    _dl_base="${OPT_BASE_URL:-${BASE_URL}}"
-    _archive_name="${ARCHIVE_NAME}_${VERSION}_${PLATFORM}_${ARCH}.tar.gz"
-    _archive_url="${_dl_base}/v${VERSION}/${_archive_name}"
-    _checksums_url="${_dl_base}/v${VERSION}/checksums.txt"
+    if [ "$_use_snapshot" = 1 ]; then
+        # Download snapshot artifact from GitHub Actions API
+        _archive="$(download_snapshot_artifact "$VERSION" "$_tmpdir")"
+        _archive_name="$(basename "$_archive")"
 
-    _archive="${_tmpdir}/${_archive_name}"
-    _checksums="${_tmpdir}/checksums.txt"
+        # No checksums verification for snapshot builds (no published checksums)
+        info "Downloaded ${_archive_name}"
+    else
+        # Construct download URL for GitHub Releases
+        _dl_base="${OPT_BASE_URL:-${BASE_URL}}"
+        _archive_name="${ARCHIVE_NAME}_${VERSION}_${PLATFORM}_${ARCH}.tar.gz"
+        _archive_url="${_dl_base}/v${VERSION}/${_archive_name}"
+        _checksums_url="${_dl_base}/v${VERSION}/checksums.txt"
 
-    info "Downloading ${_archive_name}..."
-    download_or_fail "$_archive_url" "$_archive"
+        _archive="${_tmpdir}/${_archive_name}"
+        _checksums="${_tmpdir}/checksums.txt"
 
-    if [ ! -f "$_archive" ]; then
-        error "Download failed. File not found: $_archive"
-        error "Check that version v${VERSION} exists for ${PLATFORM}/${ARCH}."
-        exit 1
+        info "Downloading ${_archive_name}..."
+        download_or_fail "$_archive_url" "$_archive"
+
+        if [ ! -f "$_archive" ]; then
+            error "Download failed. File not found: $_archive"
+            error "Check that version v${VERSION} exists for ${PLATFORM}/${ARCH}."
+            exit 1
+        fi
+
+        info "Downloading checksums..."
+        download_or_fail "$_checksums_url" "$_checksums"
+
+        # Verify SHA256
+        info "Verifying SHA256 checksum..."
+        verify_checksum "$_archive" "$_checksums"
+        completed "Checksum verified."
     fi
-
-    info "Downloading checksums..."
-    download_or_fail "$_checksums_url" "$_checksums"
-
-    # Verify SHA256
-    info "Verifying SHA256 checksum..."
-    verify_checksum "$_archive" "$_checksums"
-    completed "Checksum verified."
 
     # Extract
     info "Extracting..."
-    tar -xzf "$_archive" -C "$_tmpdir"
+    case "$_archive" in
+        *.tar.gz)
+            tar -xzf "$_archive" -C "$_tmpdir"
+            ;;
+        *.zip)
+            _extract_dir="${_tmpdir}/extract"
+            mkdir -p "$_extract_dir"
+            if check_cmd unzip; then
+                unzip -q -o "$_archive" -d "$_extract_dir"
+            elif check_cmd python3; then
+                python3 -c "import zipfile; zipfile.ZipFile('$_archive').extractall('$_extract_dir')"
+            else
+                error "Cannot extract ZIP: install unzip or python3."
+                exit 1
+            fi
+            ;;
+    esac
 
     # Find the binary
     _binary="${_tmpdir}/${PROGRAM_NAME}"
