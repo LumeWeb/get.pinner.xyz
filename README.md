@@ -39,9 +39,9 @@ curl -fsSL https://get.pinner.xyz | sh -s -- --version develop
 
 ```powershell
 # Windows
-iex (irm https://get.pinner.xyz/install.ps1) -Version 0.2.0
-iex (irm https://get.pinner.xyz/install.ps1) -Version abc1234
-iex (irm https://get.pinner.xyz/install.ps1) -Version develop
+& ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Version 0.2.0
+& ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Version abc1234
+& ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Version develop
 ```
 
 You can also set the `PINNER_VERSION` environment variable instead of the flag. The `--version` / `-Version` flag takes priority.
@@ -109,7 +109,7 @@ curl -fsSL https://get.pinner.xyz | sh -s -- --uninstall
 ```
 
 ```powershell
-iex (irm https://get.pinner.xyz/install.ps1) -Uninstall
+& ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Uninstall
 ```
 
 ## How Snapshot Builds Work
