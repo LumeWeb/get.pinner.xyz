@@ -1,7 +1,7 @@
 # Pinner CLI installer for Windows
 # Usage: iex (irm https://get.pinner.xyz/install.ps1)
-#        iex (irm https://get.pinner.xyz/install.ps1) -System
-#        iex (irm https://get.pinner.xyz/install.ps1) -Uninstall
+#        & ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -System
+#        & ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Uninstall
 
 #Requires -Version 5.1
 
@@ -140,8 +140,8 @@ Pinner CLI Installer
 
 Usage:
   iex (irm https://get.pinner.xyz/install.ps1)
-  iex (irm https://get.pinner.xyz/install.ps1) -System
-  iex (irm https://get.pinner.xyz/install.ps1) -Uninstall
+  & ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -System
+  & ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Uninstall
 
 Flags:
   -System       Install to Program Files (requires admin)
