@@ -712,7 +712,7 @@ detect_existing() {
     if [ -x "$_existing" ]; then
         _current_ver="$("$_existing" --version 2> /dev/null | head -n1 | sed 's/^[^0-9]*\([0-9][0-9.]*\).*/\1/' || true)"
         if [ -n "$_current_ver" ]; then
-            info "Upgrading from v$_current_ver to v${VERSION}"
+            info "Upgrading from v$_current_ver to ${VERSION_LABEL}"
         else
             info "Replacing existing installation in $_dir"
         fi
@@ -886,18 +886,22 @@ main() {
     if [ -n "$_requested_version" ]; then
         if is_semver "$_requested_version"; then
             VERSION="$(clean_version "$_requested_version")"
+            VERSION_LABEL="v${VERSION}"
         elif is_git_hash "$_requested_version"; then
             VERSION="$_requested_version"
             _use_snapshot=1
+            VERSION_LABEL="commit ${VERSION}"
         else
             # Treat as branch name
             VERSION="$_requested_version"
             _use_snapshot=1
+            VERSION_LABEL="branch ${VERSION}"
         fi
     else
         VERSION="$(get_latest_version)"
+        VERSION_LABEL="v${VERSION}"
     fi
-    info "Installing Pinner CLI v${VERSION} for ${PLATFORM}/${ARCH}"
+    info "Installing Pinner CLI ${VERSION_LABEL} for ${PLATFORM}/${ARCH}"
 
     # Create temp directory early (needed for package manager downloads)
     _tmpdir="$(mktemp -d)"
@@ -941,7 +945,7 @@ main() {
 
         if [ ! -f "$_archive" ]; then
             error "Download failed. File not found: $_archive"
-            error "Check that version v${VERSION} exists for ${PLATFORM}/${ARCH}."
+            error "Check that version ${VERSION_LABEL} exists for ${PLATFORM}/${ARCH}."
             exit 1
         fi
 
@@ -1028,7 +1032,7 @@ main() {
 
     # Success
     printf '\n'
-    completed "Pinner CLI v${VERSION} installed successfully!"
+    completed "Pinner CLI ${VERSION_LABEL} installed successfully!"
     show_next_steps
 }
 
