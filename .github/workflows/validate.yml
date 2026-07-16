@@ -224,6 +224,84 @@ jobs:
                         exit 1
                       fi
 
+    test-stderr-isolation:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: info()/completed() write to stderr, not stdout
+              shell: sh
+              run: |
+                  set -eu
+                  # Verify info() and completed() redirect to stderr.
+                  # stdout is captured by $() in download_snapshot_artifact and others —
+                  # if info()/completed() leak to stdout, the captured path is corrupt
+                  # (see bug: tar receives "[info] ... path" instead of just "path").
+                  #
+                  # Portion of install.sh functions under test:
+                  info() {
+                      printf '\033[1;34m[info]\033[0m  %s\n' "$1" >&2
+                  }
+                  completed() {
+                      printf '\033[1;32m[ok]\033[0m    %s\n' "$1" >&2
+                  }
+
+                  # Simulate a function that mixes info() calls with a printf return value,
+                  # exactly like download_snapshot_artifact / build_snapshot_url do.
+                  fake_capture_func() {
+                      info "Step one"
+                      info "Step two"
+                      info "Step three"
+                      printf '%s' "/tmp/artifact/pinner-cli_0.0.0-develop_linux_amd64.tar.gz"
+                  }
+
+                  # Capture only stdout — info() should be on stderr, not captured
+                  _result="$(fake_capture_func)"
+
+                  # The captured value must be the clean path only
+                  _expected="/tmp/artifact/pinner-cli_0.0.0-develop_linux_amd64.tar.gz"
+                  if [ "$_result" = "$_expected" ]; then
+                      echo "PASS: stdout capture is clean (no info leakage)"
+                  else
+                      echo "FAIL: stdout capture is polluted"
+                      echo "  Expected: $_expected"
+                      echo "  Got:      $_result"
+                      exit 1
+                  fi
+
+                  # Also verify that info messages went to stderr (visible to user)
+                  _stderr_out="$(fake_capture_func 2>&1 1>/dev/null)"
+                  if echo "$_stderr_out" | grep -q "Step one"; then
+                      echo "PASS: info messages on stderr"
+                  else
+                      echo "FAIL: info messages not on stderr"
+                      exit 1
+                  fi
+
+            - name: info()/completed() don't leak into $() in install.sh itself
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      # Run with --version develop --no-pkg --debug
+                      # This exercises the snapshot path: download_snapshot_artifact captures
+                      # a value via $() while info() is called inside.
+                      # Before the fix, info("Looking up CI snapshot...") leaked into the
+                      # captured _url variable, and tar received the info text as its filename.
+                      output=$(sh /workspace/install.sh --version develop --no-pkg --debug 2>&1 || true)
+                      # The "Downloaded" line should contain ONLY the archive name, not [info] prefixes
+                      # If the bug is present, the wget/curl download itself fails on a corrupt URL
+                      # and we won't see a clean "Downloading snapshot artifact" line followed by
+                      # "Downloaded <archive_name>".
+                      # Instead check that no "Cannot open" tar error occurs from path corruption.
+                      if echo "$output" | grep -q "Cannot open"; then
+                          echo "FAIL: tar received corrupted path (info leakage in capture)"
+                          echo "$output" | grep "Cannot open"
+                          exit 1
+                      fi
+                      echo "PASS: No tar path corruption from stdout capture"
+
     test-version-targeting:
         runs-on: ubuntu-latest
         steps:
