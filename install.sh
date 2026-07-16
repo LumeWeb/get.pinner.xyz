@@ -52,7 +52,7 @@ PINNER_BREW_FORMULA="${PINNER_BREW_FORMULA:-$BREW_PACKAGE}"
 # --- Helper functions --------------------------------------------------------
 
 info() {
-    printf '\033[1;34m[info]\033[0m  %s\n' "$1"
+    printf '\033[1;34m[info]\033[0m  %s\n' "$1" >&2
 }
 
 warn() {
@@ -64,7 +64,7 @@ error() {
 }
 
 completed() {
-    printf '\033[1;32m[ok]\033[0m    %s\n' "$1"
+    printf '\033[1;32m[ok]\033[0m    %s\n' "$1" >&2
 }
 
 need_cmd() {
