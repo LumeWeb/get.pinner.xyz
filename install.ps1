@@ -344,16 +344,20 @@ $useSnapshot = $false
 if ($requestedVersion) {
     if (Test-SemVer -Ver $requestedVersion) {
         $resolvedVersion = $requestedVersion -replace '^v', ''
+        $versionLabel = "v$resolvedVersion"
     } elseif (Test-GitHash -Ver $requestedVersion) {
         $resolvedVersion = $requestedVersion
         $useSnapshot = $true
+        $versionLabel = "commit $resolvedVersion"
     } else {
         # Treat as branch name
         $resolvedVersion = $requestedVersion
         $useSnapshot = $true
+        $versionLabel = "branch $resolvedVersion"
     }
 } else {
     $resolvedVersion = Get-LatestVersion
+    $versionLabel = "v$resolvedVersion"
 }
 
 # Skip package manager install for snapshot builds
@@ -367,13 +371,13 @@ $Arch = Get-Arch
 $Version = $resolvedVersion
 $InstallDir = Get-InstallDir
 
-Write-Info "Installing Pinner CLI v$Version for windows/$Arch"
+Write-Info "Installing Pinner CLI $versionLabel for windows/$Arch"
 
 $existingBinary = Join-Path $InstallDir "$Script:ProgramName.exe"
 if (Test-Path $existingBinary) {
     try {
         $currentVer = & $existingBinary --version 2>$null | Select-Object -First 1
-        if ($currentVer -match '\d+\.\d+\.\d+') { Write-Info "Upgrading from v$($Matches[0]) to v$Version" }
+        if ($currentVer -match '\d+\.\d+\.\d+') { Write-Info "Upgrading from v$($Matches[0]) to $versionLabel" }
         else { Write-Info 'Replacing existing installation.' }
     } catch { Write-Info 'Replacing existing installation.' }
 }
@@ -454,7 +458,7 @@ try {
     } catch { Write-Verbose "Completions install skipped: $_" }
 
     Write-Host ''
-    Write-Ok "Pinner CLI v$Version installed successfully!"
+    Write-Ok "Pinner CLI $versionLabel installed successfully!"
     Show-NextSteps
 } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
