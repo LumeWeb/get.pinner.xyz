@@ -96,11 +96,14 @@ jobs:
               shell: pwsh
               run: |
                   $env:CI = 'true'
+                  # Pin version so version resolution is local (no network call).
+                  $env:PINNER_VERSION = '0.0.0-test'
                   $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
                   # Capture output — winget will fail (fake URL in fixture) but we verify the route was reached
                   $output = ./install.ps1 *>&1 | Out-String
                   if ($output -match 'CI mode: installing from local manifest') {
                     Write-Host "PASS: WinGet manifest path reached"
+                    exit 0
                   } else {
                     Write-Host "FAIL: WinGet manifest path not reached"
                     Write-Host $output
@@ -122,6 +125,8 @@ jobs:
               run: |
                   $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
                   $env:CI = 'true'
+                  # Pin version so version resolution is local (no network call).
+                  $env:PINNER_VERSION = '0.0.0-test'
                   # Point winget manifest to a non-existent path so it fails fast,
                   # forcing the script to fall through to scoop.
                   $env:PINNER_WINGET_MANIFEST = 'C:\nonexistent\winget-manifest'
@@ -129,6 +134,7 @@ jobs:
                   $output = ./install.ps1 *>&1 | Out-String
                   if ($output -match 'CI mode: installing from local manifest.*scoop') {
                     Write-Host "PASS: Scoop manifest path reached"
+                    exit 0
                   } else {
                     Write-Host "FAIL: Scoop manifest path not reached"
                     Write-Host $output
@@ -143,11 +149,19 @@ jobs:
               shell: pwsh
               run: |
                   $env:CI = 'true'
+                  # Pin version so version resolution is local (no network call);
+                  # this test only exercises PM dispatch, not the latest-version
+                  # endpoint or a real download.
+                  $env:PINNER_VERSION = '0.0.0-test'
                   $env:PINNER_WINGET_MANIFEST = '${{ github.workspace }}\tests\fixtures\winget-manifest'
                   $env:PINNER_SCOOP_MANIFEST = '${{ github.workspace }}\tests\fixtures\scoop-manifest\pinner.json'
                   $output = ./install.ps1 *>&1 | Out-String
                   if ($output -match 'CI mode: installing from local manifest') {
                     Write-Host "PASS: PM manifest path reached"
+                    # This test validates the PM dispatch path, not a successful
+                    # install; normalize the step exit code (install.ps1 may
+                    # leave $LASTEXITCODE non-zero from a later binary fallback).
+                    exit 0
                   } else {
                     Write-Host "FAIL: Neither winget nor scoop manifest path reached"
                     Write-Host $output
@@ -368,3 +382,125 @@ jobs:
                         echo "FAIL: Env var took priority over --version flag"
                         exit 1
                       fi
+
+    test-sh-scanner:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: PINNER_SELF_TEST reports existing binary install
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      mkdir -p /root/.local/bin
+                      printf '#!/bin/sh\necho "pinner v2.3.4"\n' > /root/.local/bin/pinner
+                      chmod +x /root/.local/bin/pinner
+                      output=$(PINNER_SELF_TEST=1 HOME=/root sh /workspace/install.sh)
+                      if echo "$output" | grep -q "binary|/root/.local/bin|2.3.4|"; then
+                        echo "PASS: scanner detected binary install"
+                      else
+                        echo "FAIL: scanner output: $output"
+                        exit 1
+                      fi
+
+    test-sh-reconcile:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: "Deferred reconcile: failed install preserves old, success removes differing install"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      set -e
+                      apt-get update >/dev/null && apt-get install -y curl unzip python3 >/dev/null
+                      TEST_VER="0.0.0-test"
+                      TARBALL="pinner-cli_${TEST_VER}_linux_amd64.tar.gz"
+                      # install.sh appends /v$VERSION/ to --base-url, so serve the
+                      # archive + checksums from a v$TEST_VER/ subdirectory. Built
+                      # locally and served over localhost: fully deterministic, no
+                      # external network.
+                      mkdir -p /srv/"v${TEST_VER}"
+                      printf '#!/bin/sh\necho "pinner %s"\n' "$TEST_VER" > /srv/pinner
+                      chmod +x /srv/pinner
+                      cp /srv/pinner /srv/"v${TEST_VER}"/
+                      ( cd /srv/"v${TEST_VER}" && tar -czf "$TARBALL" pinner )
+                      ( cd /srv/"v${TEST_VER}" && sha256sum "$TARBALL" | awk '{print $1"  "$2}' > checksums.txt )
+                      # Start a local HTTP server serving /srv (where the archive
+                      # lives under v$TEST_VER/). Wait until it is reachable.
+                      python3 -m http.server 18567 --bind 127.0.0.1 --directory /srv >/var/run/srv.log 2>&1 &
+                      SRV=$!
+                      trap 'kill $SRV 2>/dev/null || true' EXIT
+                      for i in $(seq 1 30); do
+                        curl -sf -o /dev/null "http://127.0.0.1:18567/" && break
+                        sleep 0.5
+                      done
+                      echo "server ready (pid $SRV)"
+                      # Mock brew present at /opt/brew with an uninstall removing the binary.
+                      mkdir -p /opt/brew/bin /root/.local/bin
+                      printf '#!/bin/sh\necho "pinner v1.0.0"\n' > /opt/brew/bin/pinner
+                      chmod +x /opt/brew/bin/pinner
+                      printf '#!/bin/sh\ncase "$1" in\n  --prefix) echo /opt/brew ;;\n  uninstall) rm -f /opt/brew/bin/pinner ;;\nesac\n' > /usr/local/bin/brew
+                      chmod +x /usr/local/bin/brew
+                      export HOME=/root
+                      export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+                      # CASE 1 (deferral safety): a FAILED install must NOT remove
+                      # the existing differing-method (brew) install.
+                      echo "=== case 1: failing install preserves existing brew install ==="
+                      sh /workspace/install.sh --no-pkg --version "$TEST_VER" --base-url "http://127.0.0.1:9" >/tmp/c1.log 2>&1 || true
+                      if [ -x /opt/brew/bin/pinner ]; then
+                        echo "PASS: failed install preserved existing brew install"
+                      else
+                        echo "FAIL: failed install tore down existing brew install"
+                        cat /tmp/c1.log; exit 1
+                      fi
+
+                      # CASE 2 (post-install reconcile): a SUCCESSFUL install removes
+                      # the differing-method (brew) install and leaves the new binary.
+                      # ALLOW_HTTP=1 opts into the local plaintext mirror (TLS is
+                      # enforced by default; the test explicitly permits http).
+                      echo "=== case 2: successful install reconciles away differing brew install ==="
+                      if ! ALLOW_HTTP=1 sh /workspace/install.sh --no-pkg --version "$TEST_VER" --base-url "http://127.0.0.1:18567" >/tmp/c2.log 2>&1; then
+                        echo "install.sh failed in case 2; log:"
+                        cat /tmp/c2.log
+                        echo "--- server log (/var/run/srv.log) ---"
+                        cat /var/run/srv.log 2>/dev/null || true
+                        exit 1
+                      fi
+                      cat /tmp/c2.log
+                      if [ -x /opt/brew/bin/pinner ]; then
+                        echo "FAIL: differing brew install not removed after successful install"
+                        exit 1
+                      fi
+                      echo "PASS: differing brew install removed after successful install"
+                      if [ -x /root/.local/bin/pinner ]; then
+                        echo "PASS: new pinner installed at target"
+                      else
+                        echo "FAIL: target binary missing"
+                        exit 1
+                      fi
+
+    test-win-reconcile:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: PINNER_SELF_TEST detects Windows binary install
+              shell: pwsh
+              run: |
+                  $dir = Join-Path $env:LOCALAPPDATA 'Programs\pinner'
+                  New-Item -Path $dir -ItemType Directory -Force | Out-Null
+                  $bin = Join-Path $dir 'pinner.exe'
+                  Set-Content -Path $bin -Value 'placeholder' -NoNewline
+                  $env:PINNER_SELF_TEST = '1'
+                  $output = ./install.ps1 *>&1 | Out-String
+                  if ($output -match [regex]::Escape("binary|$dir")) {
+                    Write-Host "PASS: scanner detected binary install"
+                  } else {
+                    Write-Host "FAIL: scanner output: $output"
+                    exit 1
+                  }
+

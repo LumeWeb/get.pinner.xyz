@@ -1,3 +1,6 @@
 
 .sisyphus/
 dist/
+
+# local agent planning notes
+.hermes/

@@ -112,6 +112,14 @@ curl -fsSL https://get.pinner.xyz | sh -s -- --uninstall
 & ([scriptblock]::Create((irm https://get.pinner.xyz/install.ps1))) -Uninstall
 ```
 
+Uninstall removes every detected Pinner CLI install method (Homebrew, dpkg/rpm, winget, scoop, or direct binary), so no `pinner` is left on your PATH. Your configuration (`~/.config/pinner` on Linux/macOS, `%USERPROFILE%\.config\pinner` on Windows) is always preserved.
+
+## Upgrade & Cross-Method Reinstall
+
+On upgrade, the installer detects *every* Pinner CLI install location, regardless of which method placed it there. If the method this run resolves to differs from the method that installed the existing binary (for example, switching from Homebrew to a direct binary install, or from scoop to a direct binary install), the installer **removes the old install first**, then installs the new one. This guarantees only one `pinner` ever exists on your PATH; method changes no longer leave two binaries floating with one silently shadowing the other.
+
+Your configuration and any settings are preserved across a cross-method reinstall; only the existing binary, its completions, and its PATH entry are removed.
+
 ## How Snapshot Builds Work
 
 For git hash and branch version targets, the installer downloads CI snapshot artifacts built by [GoReleaser](https://goreleaser.com) in the [pinner-cli CI pipeline](https://github.com/LumeWeb/pinner-cli/actions). Downloads are served via [nightly.link](https://nightly.link), which provides public, no-auth access to GitHub Actions artifacts.
