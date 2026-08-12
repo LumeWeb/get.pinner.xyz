@@ -37,11 +37,12 @@ This repo hosts the installer scripts for [Pinner CLI](https://github.com/LumeWe
    - Version type detection: semver → GitHub Releases, git hash → CI snapshots, branch name → CI snapshots
 4. **Package manager detection** (unless `--no-pkg` or version is a snapshot):
    - macOS: Homebrew
-   - Linux: none (binary install)
-5. **Binary install path**:
+   - Linux: dpkg (`pinner-cli_<ver>_<arch>.deb`), then rpm (`pinner-cli_<ver>_<arch>.rpm`); both built by the `nfpms` block in `pinner-cli/.goreleaser.yaml` and published to every release.
+5. **Cross-method reconciliation**: `scan_pinner_locations()` enumerates every existing `pinner` install regardless of method; `reconcile_install <targets>` removes any install that a different method placed at a non-target location, so exactly one binary exists on PATH after a method change.
+6. **Binary install path**:
    - Semver: download from `github.com/LumeWeb/pinner-cli/releases/download/v<ver>/`
    - Snapshot: download via nightly.link, extract outer ZIP, find platform archive, extract, install
-6. **Install** to `~/.local/bin` (or `--bin-dir` / `--system`)
+7. **Install** to `~/.local/bin` (or `--bin-dir` / `--system`)
 
 ### Install Flow (install.ps1)
 
@@ -49,7 +50,18 @@ Same flow but with Windows package managers:
 
 1-3. Same as install.sh (flags: `-System`, `-Version`, `-NoPkg`, `-Uninstall`, `-CI`, `-Debug`)
 4. Package manager detection: winget → scoop (unless `-NoPkg` or snapshot version)
-5. Binary install to `$LOCALAPPDATA\Programs\pinner` (or `-System` for Program Files)
+5. Cross-method reconciliation via `Invoke-PinnerReconcile` (same behavior as the shell step)
+6. Binary install to `$LOCALAPPDATA\Programs\pinner` (or `-System` for Program Files)
+
+### Cross-Method Location Scan & Reconcile
+
+Pinner can be installed by several methods, each placing the binary in a DIFFERENT location:
+- nix: Homebrew → `$(brew --prefix)/bin`; dpkg/rpm → `/usr/bin` (package `pinner-cli`); binary → `~/.local/bin` (default), `/usr/local/bin` (`--system`), or `--bin-dir`
+- Windows: winget; scoop → `~\scoop\shims`; binary → `%LOCALAPPDATA%\Programs\pinner` (or `%ProgramFiles%\pinner` with `-System`)
+
+`scan_pinner_locations()` (sh) / `Get-PinnerLocations()` (PS) is the DRY primitive: it enumerates every known location regardless of which method created it, returning one record per hit (`method|location|version|on_path`). `uninstall_method` / `Remove-PinnerMethod` dispatch removal by method (proper package-manager uninstall with a binary-removal fallback). The reconcile step removes any existing install that a different method placed at a location other than this run's target(s), preventing PATH shadowing. User config (`~/.config/pinner`) is always preserved.
+
+**Self-test hook:** `PINNER_SELF_TEST=1` (sh) / `$env:PINNER_SELF_TEST='1'` (PS) runs only the location scanner and exits before any network/install work, enabling isolated CI unit tests.
 
 ### Version Resolution
 

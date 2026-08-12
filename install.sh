@@ -99,7 +99,14 @@ curl_is_snap() {
     esac
 }
 
+# Emit TLS-restricting curl flags ONLY for https URLs. `--proto =https` blocks
+# plain-HTTP downloads, so applying it unconditionally would break legitimate
+# `--base-url` overrides to a local or internal HTTP mirror.
 curl_tls_flags() {
+    case "$1" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
     if curl --proto =https --tlsv1.2 --help > /dev/null 2>&1; then
         printf '%s' "--proto =https --tlsv1.2"
     fi
@@ -109,9 +116,25 @@ download() {
     _url="$1"
     _file="$2"
 
+    case "$_url" in
+        https://*) ;;
+        *)
+            # Plaintext downloads are refused by default: with an http mirror,
+            # a MITM can substitute BOTH the archive and its checksum, so the
+            # SHA256 check provides no integrity. Only an explicit ALLOW_HTTP=1
+            # opt-in permits a non-https mirror; the operator then accepts that
+            # integrity relies on checksum verification against that mirror.
+            if [ "${ALLOW_HTTP:-0}" != 1 ]; then
+                error "Refusing plaintext download from $_url; set ALLOW_HTTP=1 to permit an http mirror."
+                return 1
+            fi
+            warn "Downloading over plaintext HTTP (non-https base-url). Integrity relies on checksum verification against the same mirror."
+            ;;
+    esac
+
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail --silent --location $(curl_tls_flags) --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
+        curl --fail --silent --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
         wget --quiet --timeout=30 --output-document="$_file" "$_url"
     elif check_cmd fetch; then
@@ -553,39 +576,303 @@ install_completions() {
 
 # --- Uninstall ---------------------------------------------------------------
 
-uninstall() {
+# Remove a plain binary install at an arbitrary directory: drop the binary,
+# remove shell completions, and strip any PATH entry for that directory.
+# Preserves user config (~/.config/pinner) unconditionally.
+# $4 = skip_completions (1 to NOT touch completion files). Used by reconcile:
+# the fresh install wrote user-level completions moments ago, so removing a
+# differing-method binary must not delete them.
+# $5 = elevate (1 to force-elevate removal of a system-dir binary, e.g. on the
+# explicit --uninstall path; 0 to tolerate unprivileged removal failure, as
+# during reconcile, so a non-root user never aborts a successful install over a
+# stale shadowing binary).
+# Returns 0 if no differing-method binary remains, 1 if one could not be removed
+# (a leftover that may shadow the new install).
+uninstall_binary() {
     _dir="$1"
     _shell="$2"
     _rc="$3"
+    _skip_completions="${4:-0}"
+    _elevate="${5:-0}"
     _binary="${_dir}/${PROGRAM_NAME}"
+    _removed=0
 
     if [ -f "$_binary" ]; then
-        rm -f "$_binary"
-        info "Removed $_binary"
+        case "$_dir" in
+            /usr/bin|/usr/local/bin)
+                # System dir: removing requires privileges. Unlike elevate_priv
+                # (which exits the whole script when sudo is unavailable), the
+                # uninstall path must stay non-fatal: a single unremovable
+                # system binary must not abort the run and strand every other
+                # method install on PATH. Check privileges and leave a clear
+                # warning when they are missing.
+                if [ "$(id -u)" = 0 ] || { check_cmd sudo && sudo -n true 2> /dev/null; }; then
+                    sudo rm -f "$_binary"
+                else
+                    warn "No privileges to remove $_binary; leaving it in place (may shadow the new install)."
+                fi
+                ;;
+            *)
+                rm -f "$_binary"
+                ;;
+        esac
+        if [ -f "$_binary" ]; then
+            # Removal did not complete (no privileges).
+            _removed=0
+        else
+            info "Removed $_binary"
+            _removed=1
+        fi
     else
         warn "$_binary not found."
+        _removed=1
     fi
 
-    case "$_shell" in
-        bash)
-            rm -f "${HOME}/.local/share/bash-completion/completions/${PROGRAM_NAME}"
+    # Only remove completions when this binary actually owns them. System/PM
+    # dirs (/usr/bin, /usr/local/bin) manage their own completions, and during
+    # reconcile the new install has already written the user-level files.
+    if [ "$_skip_completions" != 1 ]; then
+        case "$_dir" in
+            /usr/bin|/usr/local/bin) : ;;  # pkg-managed: leave completions alone
+            *)
+                case "$_shell" in
+                    bash)
+                        rm -f "${HOME}/.local/share/bash-completion/completions/${PROGRAM_NAME}"
+                        ;;
+                    zsh)
+                        rm -f "${HOME}/.local/share/zsh/site-functions/_${PROGRAM_NAME}"
+                        ;;
+                    fish)
+                        rm -f "${HOME}/.local/share/fish/vendor_completions.d/${PROGRAM_NAME}.fish"
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+
+    # Never edit PATH entries for system dirs. /usr/bin and /usr/local/bin are
+    # provisioned by the OS (via /etc/profile, /etc/environment, etc.), not the
+    # user shell rc file. Grepping them there would match any line containing
+    # the substring and strip unrelated PATH components (e.g. /usr/local/bin
+    # or /bin) from the user's rc.
+    case "$_dir" in
+        /usr/bin|/usr/local/bin)
+            : # system PATH dirs: leave user rc untouched
             ;;
-        zsh)
-            rm -f "${HOME}/.local/share/zsh/site-functions/_${PROGRAM_NAME}"
-            ;;
-        fish)
-            rm -f "${HOME}/.local/share/fish/vendor_completions.d/${PROGRAM_NAME}.fish"
+        *)
+            if [ -f "$_rc" ]; then
+                _tmp_rc="$(mktemp)"
+                grep -v "$_dir" "$_rc" > "$_tmp_rc" 2> /dev/null || true
+                if ! cmp -s "$_rc" "$_tmp_rc"; then
+                    mv "$_tmp_rc" "$_rc"
+                    info "Removed PATH entry from $_rc"
+                else
+                    rm -f "$_tmp_rc"
+                fi
+            fi
             ;;
     esac
 
-    if [ -f "$_rc" ]; then
-        _tmp_rc="$(mktemp)"
-        grep -v "$_dir" "$_rc" > "$_tmp_rc" 2> /dev/null || true
-        if ! cmp -s "$_rc" "$_tmp_rc"; then
-            mv "$_tmp_rc" "$_rc"
-            info "Removed PATH entry from $_rc"
+    # Return 0 when no differing-method binary remains, 1 when one was left in
+    # place (could not be removed). reconcile_install uses this to flag a
+    # leftover that may shadow the new install.
+    [ "$_removed" = 1 ]
+}
+
+# Return 0 if the given path is an OS-standard system directory that the
+# installer must never delete wholesale (it merely manages the pinner file
+# within it). Used to gate dir-removal and PATH-editing so /usr/bin and
+# /usr/local/bin are never rmdir-ed or stripped less carefully than the OS
+# expects.
+is_system_dir() {
+    case "$1" in
+        /usr/bin|/usr/local/bin) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Remove an empty install directory if it no longer contains anything.
+uninstall_cleanup_dir() {
+    _dir="$1"
+    if [ -d "$_dir" ] && [ -z "$(ls -A "$_dir" 2> /dev/null || true)" ]; then
+        rmdir "$_dir" 2> /dev/null || true
+    fi
+}
+
+# Homebrew-managed install: proper `brew uninstall`, falling back to file
+# removal if Homebrew is absent or the uninstall fails.
+# $2 = skip_completions (forwarded to uninstall_binary so a cross-method
+# reconcile never deletes the fresh install's user completions).
+uninstall_brew() {
+    _loc="$1"
+    _skip="${2:-0}"
+    if check_cmd brew && brew uninstall "$PINNER_BREW_FORMULA" 2> /dev/null; then
+        info "Uninstalled via Homebrew ($PINNER_BREW_FORMULA)."
+        return 0
+    else
+        warn "brew uninstall failed/absent. Removing binary directly."
+        uninstall_binary "$_loc" "$DETECTED_SHELL" "$RC_FILE" "$_skip"
+        _rc="$?"
+        # Only remove the now-empty dir for a user location; never rmdir an
+        # OS-standard system dir (e.g. /usr/local/bin) that other installs and
+        # the OS expect to exist.
+        if ! is_system_dir "$_loc"; then
+            uninstall_cleanup_dir "$_loc"
+        fi
+        return "$_rc"
+    fi
+}
+
+# dpkg-managed install (package pinner-cli -> /usr/bin).
+# $1 = elevate (1 to force-elevate on the explicit --uninstall path; 0 for
+# reconcile, tolerating unprivileged removal failure).
+uninstall_dpkg() {
+    _loc="/usr/bin"
+    _elevate="${1:-0}"
+    _ok=0
+    if check_cmd dpkg; then
+        if [ "$(id -u)" = 0 ]; then
+            dpkg -r pinner-cli 2> /dev/null && _ok=1
+        elif check_cmd sudo; then
+            sudo dpkg -r pinner-cli 2> /dev/null && _ok=1
+        fi
+    fi
+    if [ "$_ok" = 1 ]; then
+        info "Uninstalled via dpkg (pinner-cli)."
+        return 0
+    elif [ "$_elevate" = 1 ]; then
+        # Explicit --uninstall: attempt an escalated direct removal, but stay
+        # non-fatal. elevate_priv would `exit 1` when sudo is unavailable, which
+        # would abort the whole uninstall and strand every other method install
+        # on PATH; instead warn and report a leftover.
+        if [ "$(id -u)" = 0 ] || { check_cmd sudo && sudo -n true 2> /dev/null; }; then
+            info "dpkg uninstall failed/absent. Removing binary directly."
+            sudo rm -f "$_loc/$PROGRAM_NAME"
+            return 0
         else
-            rm -f "$_tmp_rc"
+            warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
+            return 1
+        fi
+    else
+        warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
+        # reconcile: signal a leftover that may shadow the new install.
+        return 1
+    fi
+}
+
+# rpm-managed install (package pinner-cli -> /usr/bin).
+# $1 = elevate (1 to force-elevate on the explicit --uninstall path; 0 for
+# reconcile, tolerating unprivileged removal failure).
+uninstall_rpm() {
+    _loc="/usr/bin"
+    _elevate="${1:-0}"
+    _ok=0
+    if check_cmd rpm; then
+        if [ "$(id -u)" = 0 ]; then
+            rpm -e pinner-cli 2> /dev/null && _ok=1
+        elif check_cmd sudo; then
+            sudo rpm -e pinner-cli 2> /dev/null && _ok=1
+        fi
+    fi
+    if [ "$_ok" = 1 ]; then
+        info "Uninstalled via rpm (pinner-cli)."
+        return 0
+    elif [ "$_elevate" = 1 ]; then
+        # Explicit --uninstall: attempt an escalated direct removal, but stay
+        # non-fatal. elevate_priv would `exit 1` when sudo is unavailable, which
+        # would abort the whole uninstall and strand every other method install
+        # on PATH; instead warn and report a leftover.
+        if [ "$(id -u)" = 0 ] || { check_cmd sudo && sudo -n true 2> /dev/null; }; then
+            info "rpm uninstall failed/absent. Removing binary directly."
+            sudo rm -f "$_loc/$PROGRAM_NAME"
+            return 0
+        else
+            warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
+            return 1
+        fi
+    else
+        warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
+        # reconcile: signal a leftover that may shadow the new install.
+        return 1
+    fi
+}
+
+# Dispatch an uninstall for a single detected method+location.
+# $3 = skip_completions (1 when called from reconcile, so the fresh install's
+# user-level completions are never removed).
+# $4 = elevate (1 to force-elevate system-dir removal on explicit --uninstall;
+# 0 for reconcile, which tolerates unprivileged removal failure).
+# Returns 0 if no differing-method binary remains, 1 if a leftover remains.
+uninstall_method() {
+    _method="$1"
+    _loc="$2"
+    _skip="${3:-0}"
+    _elevate="${4:-0}"
+    case "$_method" in
+        binary|system)
+            uninstall_binary "$_loc" "$DETECTED_SHELL" "$RC_FILE" "$_skip" "$_elevate"
+            _rc="$?"
+            # Only remove the now-empty install directory for USER locations.
+            # /usr/bin and /usr/local/bin are OS-standard system directories the
+            # install/remove logic refuses to touch elsewhere: rmdir-ing them
+            # would delete a directory other installs/uninstalls expect to exist.
+            if ! is_system_dir "$_loc"; then
+                uninstall_cleanup_dir "$_loc"
+            fi
+            return "$_rc"
+            ;;
+        brew)
+            uninstall_brew "$_loc" "$_skip"
+            ;;
+        dpkg)
+            uninstall_dpkg "$_elevate"
+            ;;
+        rpm)
+            uninstall_rpm "$_elevate"
+            ;;
+        *)
+            warn "Unknown install method '$_method'; preserving install at $_loc."
+            ;;
+    esac
+}
+
+# Public `--uninstall` entry: remove EVERY detected install method so no
+# pinner binary is left floating on PATH. Config is always preserved.
+uninstall() {
+    _default_dir="$1"
+    _shell="$2"
+    _rc="$3"
+
+    # Set globals used by uninstall dispatch.
+    DETECTED_SHELL="$_shell"
+    RC_FILE="$_rc"
+
+    _found_any=0
+    _scanned="$(scan_pinner_locations 2> /dev/null || true)"
+    if [ -n "$_scanned" ]; then
+        _oifs="$IFS"; IFS='
+'
+        for _line in $_scanned; do
+            IFS='|' read -r _m _l _v _on <<EOF
+$_line
+EOF
+            [ -z "$_m" ] && continue
+            info "Uninstalling pinner installed via '$_m' at ${_l:-<unknown>}"
+            uninstall_method "$_m" "$_l" 0 1 || true
+            _found_any=1
+        done
+        IFS="$_oifs"
+    fi
+
+    # If scanner found nothing attributable, still attempt the default dir so the
+    # script remains a valid uninstaller even for unusual/custom installs.
+    if [ "$_found_any" = 0 ] && [ -x "${_default_dir}/${PROGRAM_NAME}" ]; then
+        info "Uninstalling pinner from default dir $_default_dir"
+        uninstall_binary "$_default_dir" "$_shell" "$_rc" || true
+        # Only remove the now-empty dir for a user location; never rmdir an
+        # OS-standard system dir (e.g. /usr/local/bin) expected to exist.
+        if ! is_system_dir "$_default_dir"; then
+            uninstall_cleanup_dir "$_default_dir"
         fi
     fi
 
@@ -719,6 +1006,139 @@ detect_existing() {
     fi
 }
 
+# --- Cross-method location scanner -------------------------------------------
+#
+# pinner can be installed by several methods, each placing the binary in a
+# DIFFERENT location (brew -> brew --prefix/bin, dpkg/rpm -> /usr/bin,
+# binary -> ~/.local/bin (default), /usr/local/bin (--system), or --bin-dir).
+# Historically each method only detected its OWN location, so a cross-method
+# upgrade (e.g. brew -> binary) left two `pinner` binaries on PATH with one
+# silently shadowing the other.
+#
+# scan_pinner_locations() is the DRY primitive: it enumerates EVERY known
+# install location regardless of which method created it, reporting each hit.
+# Output format (one line per existing install):
+#     <method>|<location>|<version>|on_path
+#   method  : binary|system|brew|dpkg|rpm   (how it is managed)
+#   location: directory containing the binary ("" if not resolvable, e.g. dpkg)
+#   version : parsed from `pinner --version` (may be empty if unparseable)
+#   on_path : 1 if <location> is on the user's PATH, else 0
+#
+# Locations are scanned in PATH-precedence order so the FIRST hit is the one
+# that currently wins on PATH (the "effective" current install).
+
+# Returns 0 if directory $1 appears in the user's PATH.
+dir_on_path() {
+    _probe="$1"
+    _oifs="$IFS"
+    IFS=':'
+    for _p in $PATH; do
+        if [ -n "$_p" ] && [ "$_p" = "$_probe" ]; then
+            IFS="$_oifs"
+            return 0
+        fi
+    done
+    IFS="$_oifs"
+    return 1
+}
+
+# Read the version out of a pinner binary, normalized to X.Y.Z (or empty).
+probe_version() {
+    _bin="$1"
+    "$_bin" --version 2> /dev/null | head -n1 | sed 's/^[^0-9]*\([0-9][0-9.]*\).*/\1/'
+}
+
+# Emit one scanner line for a binary install at a given method+location.
+# Returns 0 only if the binary exists.
+scan_binary_slot() {
+    _method="$1"
+    _loc="$2"
+    [ -x "$_loc/${PROGRAM_NAME}" ] || return 1
+    _v="$(probe_version "$_loc/${PROGRAM_NAME}")"
+    _on=0
+    dir_on_path "$_loc" && _on=1
+    printf '%s|%s|%s|%s\n' "$_method" "$_loc" "$_v" "$_on"
+    return 0
+}
+
+scan_pinner_locations() {
+    # binary (default per-user)
+    scan_binary_slot binary "${HOME}/.local/bin" || true
+    # system (/usr/local/bin)
+    scan_binary_slot system /usr/local/bin || true
+    # Homebrew
+    if check_cmd brew; then
+        _brew_prefix="$(brew --prefix 2> /dev/null || true)"
+        if [ -n "$_brew_prefix" ]; then
+            scan_binary_slot brew "${_brew_prefix}/bin" || true
+        fi
+    fi
+    # dpkg (package pinner-cli -> /usr/bin)
+    if check_cmd dpkg && dpkg -l pinner-cli 2> /dev/null | grep -q '^ii'; then
+        printf '%s|%s|%s|%s\n' dpkg /usr/bin "$(probe_version /usr/bin/pinner 2>/dev/null)" "$(dir_on_path /usr/bin && printf 1 || printf 0)"
+    fi
+    # rpm (package pinner-cli -> /usr/bin)
+    if check_cmd rpm && rpm -q pinner-cli 2> /dev/null | grep -q 'pinner-cli'; then
+        printf '%s|%s|%s|%s\n' rpm /usr/bin "$(probe_version /usr/bin/pinner 2>/dev/null)" "$(dir_on_path /usr/bin && printf 1 || printf 0)"
+    fi
+}
+
+# Remove any existing pinner install that a DIFFERENT method placed at a
+# location other than the one(s) this run will target. This prevents two
+# `pinner` binaries floating on PATH (one silently shadowing the other) when
+# the resolved install method changes (e.g. brew -> binary). User config
+# (~/.config/pinner) and completions for the surviving target are preserved;
+# only the differing-method binary and its PATH entry are removed.
+#
+# $1 = newline-separated list of locations this run may install into.
+# Returns 0 if reconciliation fully cleaned up differing-method installs, or 1
+# if one or more could not be removed (a leftover that may shadow the new
+# install). A non-zero return is NON-FATAL: the new install already succeeded,
+# so the caller reports success but surfaces the leftover to the user.
+reconcile_install() {
+    _target_dirs="$1"
+    _scanned="$(scan_pinner_locations 2> /dev/null || true)"
+    [ -z "$_scanned" ] && return 0
+
+    _leftover=0
+    _oifs="$IFS"; IFS='
+'
+    for _line in $_scanned; do
+        IFS='|' read -r _m _l _v _on <<EOF
+$_line
+EOF
+        [ -z "$_m" ] || [ -z "$_l" ] && continue
+
+        # Skip if this install is at one of our target locations (in-place upgrade).
+        _is_target=0
+        _t_ifs="$IFS"; IFS='
+'
+        for _t in $_target_dirs; do
+            [ -n "$_t" ] && [ "$_t" = "$_l" ] && _is_target=1
+        done
+        IFS="$_t_ifs"
+        [ "$_is_target" = 1 ] && continue
+
+        # Different-method install elsewhere on PATH -> remove it.
+        warn "Removing existing pinner installed via '$_m' at $_l (target for this run differs)."
+        info "User config (~/.config/pinner) will be preserved."
+        # Skip completion removal: the fresh install wrote user-level
+        # completions moments ago, so a reconciling removal must not delete them.
+        if ! uninstall_method "$_m" "$_l" 1; then
+            _leftover=1
+        fi
+    done
+    IFS="$_oifs"
+
+    if [ "$_leftover" = 1 ]; then
+        # Non-fatal: the fresh install is in place and working, but an older
+        # binary we could not remove (e.g. no privileges) may still shadow it.
+        error "Reconciliation could not remove one or more existing pinner binaries; an older install may still shadow the new one on PATH."
+        error "Re-run this installer with sudo/root, or remove the stale binary manually, so only the new pinner remains."
+    fi
+    return "$_leftover"
+}
+
 # Check if this is a first-time install (no config file exists yet)
 is_new_install() {
     _config_dir="${HOME}/.config/pinner"
@@ -828,6 +1248,14 @@ try_rpm_install() {
 main() {
     parse_flags "$@"
 
+    # Internal self-test hook: PINNER_SELF_TEST=1 runs only the location
+    # scanner (no network, no install) so CI can unit-test cross-method
+    # detection in isolation.
+    if [ "${PINNER_SELF_TEST:-}" = 1 ]; then
+        scan_pinner_locations
+        exit 0
+    fi
+
     if [ "$OPT_DEBUG" = 1 ]; then
         set -x
     fi
@@ -903,6 +1331,19 @@ main() {
     fi
     info "Installing Pinner CLI ${VERSION_LABEL} for ${PLATFORM}/${ARCH}"
 
+    # Cross-method reconciliation is DEFERRED until after a successful install
+    # (below), so a failed download or install never leaves the user without a
+    # working pinner. The target set is the location the binary REALLY landed
+    # in this run, determined per branch: a package manager install targets its
+    # own dir only, and the binary fallback targets $_install_dir only. Using
+    # the actual installed location (rather than an optimistic union of all
+    # possible locations) means a stale earlier package-manager binary in a dir
+    # we did NOT install into this run is reconciled away, so it cannot shadow
+    # the freshly installed binary. reconcile_install may return non-zero when
+    # a stale binary could not be removed (e.g. no privileges); that is
+    # non-fatal and reported inside reconcile_install, so the call is guarded
+    # against `set -e` and never aborts the (already successful) install.
+
     # Create temp directory early (needed for package manager downloads)
     _tmpdir="$(mktemp -d)"
     trap 'rm -rf "$_tmpdir"' EXIT
@@ -911,13 +1352,22 @@ main() {
     if [ "$_use_snapshot" = 0 ] && [ "$OPT_NO_PKG" = 0 ]; then
         if [ "$PLATFORM" = "darwin" ]; then
             if try_homebrew_install; then
+                # Homebrew install confirmed present: only the brew bin dir is a
+                # target this run. A stale binary elsewhere (incl. $_install_dir)
+                # is reconciled away so it cannot shadow the brew install.
+                _brew_prefix="$(brew --prefix 2> /dev/null || true)"
+                if [ -n "$_brew_prefix" ]; then
+                    reconcile_install "${_brew_prefix}/bin" || true
+                fi
                 exit 0
             fi
         elif [ "$PLATFORM" = "linux" ]; then
             if try_dpkg_install; then
+                reconcile_install "/usr/bin" || true
                 exit 0
             fi
             if try_rpm_install; then
+                reconcile_install "/usr/bin" || true
                 exit 0
             fi
         fi
@@ -1029,6 +1479,16 @@ main() {
 
     # Configure PATH
     configure_path "$_install_dir" "$DETECTED_SHELL" "$RC_FILE"
+
+    # New binary is confirmed present at $_install_dir. Reconcile only that dir
+    # (the location the binary really landed in) as a target, so any stale
+    # differing-method install elsewhere on PATH — including an old package
+    # manager binary in /usr/bin or brew-prefix/bin — is reconciled away and
+    # cannot shadow the fresh binary. Deferred to here so a failed download or
+    # extract never tears down an existing working pinner. Guarded against
+    # `set -e`: a leftover we could not remove is non-fatal (reported inside),
+    # and the install has already succeeded.
+    reconcile_install "$_install_dir" || true
 
     # Success
     printf '\n'

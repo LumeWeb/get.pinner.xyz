@@ -39,6 +39,79 @@ function Test-NewInstall {
     -not (Test-Path $configFile)
 }
 
+# --- Cross-method location scanner --------------------------------------------
+#
+# pinner can be installed by several methods, each placing the binary in a
+# DIFFERENT location (winget, scoop, binary at %LOCALAPPDATA%\Programs\pinner,
+# or system at %ProgramFiles%\pinner). Historically each method only detected
+# its OWN location, so a cross-method upgrade (e.g. scoop -> binary) left two
+# pinner binaries on PATH with one silently shadowing the other.
+#
+# Get-PinnerLocations() is the DRY primitive: it enumerates EVERY known install
+# location regardless of which method created it, returning one object per hit:
+#   Method   : binary|system|winget|scoop  (how it is managed)
+#   Location : directory containing the binary ('' if not resolvable, e.g. winget)
+#   Version  : parsed from `pinner --version` (may be empty)
+#   OnPath   : $true if <Location> is on the user's PATH
+#
+# Locations are scanned in PATH-precedence order so the FIRST hit is the one
+# that currently wins on PATH (the "effective" current install).
+function Get-PinnerLocations {
+    $pathList = @()
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath) { $pathList += $userPath -split ';' }
+    if ($env:Path) { $pathList += $env:Path -split ';' }
+
+    $results = @()
+
+    # binary (default per-user)
+    $locBinary = Join-Path $env:LOCALAPPDATA 'Programs\pinner'
+    $bin = Join-Path $locBinary "$Script:ProgramName.exe"
+    if (Test-Path $bin) {
+        $v = Get-PinnerVersion $bin
+        $on = $false; if ($pathList -contains $locBinary) { $on = $true }
+        $results += [pscustomobject]@{ Method = 'binary'; Location = $locBinary; Version = $v; OnPath = $on }
+    }
+
+    # system (%ProgramFiles%\pinner)
+    $locSys = Join-Path $env:ProgramFiles 'pinner'
+    $binSys = Join-Path $locSys "$Script:ProgramName.exe"
+    if (Test-Path $binSys) {
+        $v = Get-PinnerVersion $binSys
+        $on = $false; if ($pathList -contains $locSys) { $on = $true }
+        $results += [pscustomobject]@{ Method = 'system'; Location = $locSys; Version = $v; OnPath = $on }
+    }
+
+    # scoop (shim at ~\scoop\shims)
+    $shims = Join-Path $env:USERPROFILE 'scoop\shims'
+    $shimBin = Join-Path $shims "$Script:ProgramName.exe"
+    if ((Get-Command scoop -ErrorAction SilentlyContinue) -and (Test-Path $shimBin)) {
+        $v = Get-PinnerVersion $shimBin
+        $on = $false; if ($pathList -contains $shims) { $on = $true }
+        $results += [pscustomobject]@{ Method = 'scoop'; Location = $shims; Version = $v; OnPath = $on }
+    }
+
+    # winget (location not resolvable from metadata; flag by package presence)
+    if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+        $wg = winget list --id $Script:WinGetPackageId --accept-source-agreements 2>$null | Out-String
+        if ($wg -match [regex]::Escape($Script:WinGetPackageId)) {
+            $results += [pscustomobject]@{ Method = 'winget'; Location = ''; Version = 'unknown'; OnPath = $true }
+        }
+    }
+
+    return $results
+}
+
+# Read a normalized version (X.Y.Z or empty) out of a pinner binary.
+function Get-PinnerVersion {
+    param([string]$Bin)
+    try {
+        $out = & $Bin --version 2>$null | Select-Object -First 1
+        if ($out -match '\d+\.\d+\.\d+') { return $Matches[0] }
+    } catch { }
+    return ''
+}
+
 function Show-NextSteps {
     if (Get-Command $Script:ProgramName -ErrorAction SilentlyContinue) {
         if (Test-NewInstall) {
@@ -68,8 +141,31 @@ function Invoke-PMInstall {
     param([string]$Name, [scriptblock]$Action, [string]$SuccessMsg, [string]$AlreadyInstalledMsg)
     try {
         & $Action
-        if ($LASTEXITCODE -eq 0) { Write-Ok $SuccessMsg; Show-NextSteps; exit 0 }
-        if ($AlreadyInstalledMsg -and $LASTEXITCODE -eq -1966105625) { Write-Ok $AlreadyInstalledMsg; Show-NextSteps; exit 0 }
+        if ($LASTEXITCODE -eq 0) {
+            # New install is confirmed present; record that this run resolved to
+            # this package manager, so reconcile keeps the matching PM install.
+            $Script:PkgSucceeded = $true
+            if ($Name -eq 'winget') { $Script:ResolvedToWinget = $true }
+            # Reconcile against ONLY the location this method actually landed
+            # in, so a differing-method install at any other location (e.g. a
+            # direct binary at Get-InstallDir when scoop succeeds) is removed
+            # and cannot shadow the fresh PM install.
+            $pmTargets = @()
+            if ($Name -eq 'scoop') { $pmTargets = @(Join-Path $env:USERPROFILE 'scoop\shims') }
+            Invoke-PinnerReconcile -TargetDirs $pmTargets
+            Write-Ok $SuccessMsg; Show-NextSteps; exit 0
+        }
+        if ($AlreadyInstalledMsg -and $LASTEXITCODE -eq -1966105625) {
+            # winget reports the package is already installed and manages it;
+            # this run resolved to winget, so keep the winget install. Reconcile
+            # now so a previously installed binary from another method does not
+            # keep shadowing the winget-managed binary on PATH.
+            if ($Name -eq 'winget') {
+                $Script:ResolvedToWinget = $true
+                Invoke-PinnerReconcile -TargetDirs @()
+            }
+            Write-Ok $AlreadyInstalledMsg; Show-NextSteps; exit 0
+        }
         Write-Warn "$Name install failed (exit code $LASTEXITCODE). Falling back..."
     } catch {
         Write-Warn "$Name install failed: $_. Falling back..."
@@ -319,23 +415,143 @@ function Remove-FromPath($Dir) {
 
 # ── Uninstall ──────────────────────────────────────────────────────────────
 
-if ($Uninstall) {
-    $dir = Get-InstallDir
-    $binary = Join-Path $dir "$Script:ProgramName.exe"
-    if (Test-Path $binary) { Remove-Item $binary -Force; Write-Info "Removed $binary" }
-    else { Write-Warn "$binary not found." }
-    if ((Test-Path $dir) -and -not (Get-ChildItem $dir -Recurse)) { Remove-Item $dir -Force }
-    Remove-FromPath $dir
+# Remove a plain binary install at an arbitrary directory: drop the exe and
+# (if now empty) the directory. Removes the PATH entry. Preserves user config
+# (~\.config\pinner) unconditionally.
+function Remove-PinnerBinary {
+    param([string]$Dir, [switch]$SkipCompletions)
+    $bin = Join-Path $Dir "$Script:ProgramName.exe"
+    if (Test-Path $bin) { Remove-Item $bin -Force; Write-Info "Removed $bin" }
+    else { Write-Warn "$bin not found." }
+    if ((Test-Path $Dir) -and -not (Get-ChildItem $Dir -Recurse)) { Remove-Item $Dir -Force }
+    Remove-FromPath $Dir
+    if (-not $SkipCompletions) { Remove-Completions }
+}
+
+# Strip the Pinner CLI completions block from the PowerShell $PROFILE, if present.
+function Remove-Completions {
     if ($PROFILE -and (Test-Path $PROFILE)) {
         $content = Get-Content $PROFILE -Raw
         $cleaned = $content -replace '(?m)^# Pinner CLI completions\r?\n.*?\r?\n', ''
         if ($cleaned -ne $content) { Set-Content $PROFILE $cleaned -NoNewline; Write-Info "Removed completions from $PROFILE" }
     }
+}
+
+# winget-managed install: proper `winget uninstall`. Winget does not expose its
+# binary dir cleanly (its install Location is unresolvable), so if `winget
+# uninstall` fails there is no reliable way to identify which on-disk binary
+# belongs to the winget package. We therefore do NOT guess and delete an
+# arbitrary binary/system install (that could be an unrelated legitimate pinner
+# install); instead we warn and leave the winget install in place.
+function Remove-PinnerWinget {
+    param([switch]$SkipCompletions)
+    if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+        winget uninstall --id $Script:WinGetPackageId --accept-source-agreements --accept-package-agreements --disable-interactivity 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Info "Uninstalled via winget ($Script:WinGetPackageId)."; return }
+        Write-Warn "winget uninstall failed and no winget binary location is resolvable; leaving the winget install in place."
+    }
+}
+
+# scoop-managed install: proper `scoop uninstall`, falling back to binary removal.
+function Remove-PinnerScoop {
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        scoop uninstall pinner 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Info 'Uninstalled via scoop.'; return }
+        Write-Warn 'scoop uninstall failed. Removing binary directly.'
+    }
+    # The scoop shims dir is shared by every scoop-installed app (it holds the
+    # shim .exe + the single PATH entry that resolves them all). Never run
+    # Remove-PinnerBinary here: it would strip the shims PATH entry (breaking
+    # every other scoop app) and wipe the profile completions block. Instead,
+    # remove only the pinner shim(s).
+    $shims = Join-Path $env:USERPROFILE 'scoop\shims'
+    $pinnerShim = Join-Path $shims "$Script:ProgramName.exe"
+    if (Test-Path $pinnerShim) { Remove-Item $pinnerShim -Force; Write-Info "Removed $pinnerShim" }
+    else { Write-Warn "$pinnerShim not found." }
+}
+
+# Dispatch an uninstall for a single detected method.
+function Remove-PinnerMethod {
+    param([string]$Method, [string]$Location, [switch]$SkipCompletions)
+    switch ($Method) {
+        'binary' { Remove-PinnerBinary -Dir $Location -SkipCompletions:$SkipCompletions }
+        'system' { Remove-PinnerBinary -Dir $Location -SkipCompletions:$SkipCompletions }
+        'winget' { Remove-PinnerWinget -SkipCompletions:$SkipCompletions }
+        'scoop'  { Remove-PinnerScoop }
+        default  { Write-Warn "Unknown install method '$Method'; preserving install." }
+    }
+}
+
+# Public -Uninstall: remove EVERY detected install method so no pinner binary
+# is left floating on PATH. Config is always preserved.
+function Invoke-PinnerUninstall {
+    $foundAny = $false
+    foreach ($inst in Get-PinnerLocations) {
+        Write-Info "Uninstalling pinner installed via '$($inst.Method)' at $($inst.Location)"
+        Remove-PinnerMethod -Method $inst.Method -Location $inst.Location
+        $foundAny = $true
+    }
+    # Fall back to the default dir so -Uninstall stays valid for custom installs.
+    if (-not $foundAny) {
+        $dir = Get-InstallDir
+        if (Test-Path (Join-Path $dir "$Script:ProgramName.exe")) {
+            Write-Info "Uninstalling pinner from default dir $dir"
+            Remove-PinnerBinary -Dir $dir
+        }
+    }
     Write-Ok 'Pinner CLI has been uninstalled.'
     exit 0
 }
 
+if ($Uninstall) {
+    Invoke-PinnerUninstall
+}
+
 # ── Main install ───────────────────────────────────────────────────────────
+
+# Cross-method reconciliation: remove any existing pinner install that a
+# different method placed at a location other than this run's target(s), so
+# only ONE `pinner` is ever on PATH (no shadowing on method change). User
+# config is always preserved.
+#
+# $TargetDirs = array of locations this run may install into.
+function Invoke-PinnerReconcile {
+    param([string[]]$TargetDirs)
+    foreach ($inst in @(Get-PinnerLocations)) {
+        # Winget has no resolvable Location. Only remove an existing winget
+        # install when this run did NOT actually resolve to winget (a
+        # cross-method change, e.g. winget install failed and we fell back to
+        # binary). When this run succeeded via winget (in-place upgrade), keep
+        # the winget install.
+        if ($inst.Method -eq 'winget') {
+            if ($Script:ResolvedToWinget) { continue }
+            # Skip completions: a cross-method change to a fresh install just
+            # wrote the profile block; removing the old winget binary must not
+            # delete it.
+            Remove-PinnerWinget -SkipCompletions
+            continue
+        }
+        if (-not $inst.Location) { continue }
+        if ($TargetDirs -contains $inst.Location) { continue }
+        Write-Warn "Removing existing pinner installed via '$($inst.Method)' at $($inst.Location) (target for this run differs)."
+        Write-Info 'User config will be preserved.'
+        # Skip completion removal: the fresh install wrote the '# Pinner CLI
+        # completions' block moments ago, so reconciling away a differing-method
+        # binary must not delete it.
+        Remove-PinnerMethod -Method $inst.Method -Location $inst.Location -SkipCompletions
+    }
+    # Detection-only native calls above may have left a non-zero $LASTEXITCODE
+    # (e.g. `winget list` in a CI container without a working source). Clear it
+    # so the installer and any CI wrapper exit cleanly on success.
+    $global:LASTEXITCODE = 0
+}
+
+# Internal self-test hook: PINNER_SELF_TEST=1 runs only the location scanner
+# (no network, no install) so CI can unit-test cross-method detection.
+if ($env:PINNER_SELF_TEST -eq '1') {
+    Get-PinnerLocations | ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Method, $_.Location, $_.Version, $_.OnPath }
+    exit 0
+}
 
 # Version resolution: -Version flag > PINNER_VERSION env > latest endpoint
 $requestedVersion = if ($Version) { $Version } elseif ($env:PINNER_VERSION) { $env:PINNER_VERSION } else { $null }
@@ -360,8 +576,29 @@ if ($requestedVersion) {
     $versionLabel = "v$resolvedVersion"
 }
 
+$usePkg = (-not $useSnapshot -and -not $NoPkg)
+# Track whether a package manager actually succeeded this run and, specifically,
+# whether it resolved to winget. Reconcile uses these (not the static $usePkg)
+# so a PM that failed and fell back to a binary install is treated as
+# cross-method and removed, preventing a stale winget install from shadowing
+# the freshly installed binary.
+$Script:PkgSucceeded = $false
+$Script:ResolvedToWinget = $false
+
+# Cross-method reconciliation target for the DIRECT BINARY path. Reconcile is
+# DEFERRED until after a successful install (see Invoke-PMInstall and the binary
+# path below), so a failed download or install never leaves the user without a
+# working pinner. The target is scoped to the single directory the binary
+# actually lands in (Get-InstallDir); a differing-method install at any other
+# location is removed so it cannot shadow the fresh binary. The PM success path
+# computes its own scoped target separately (see Invoke-PMInstall).
+$BinaryTarget = @(Get-InstallDir)
+# NOTE: Invoke-PinnerReconcile is intentionally NOT called here. It runs only
+# after a successful install, so we never tear down an existing working pinner
+# before its replacement is confirmed present.
+
 # Skip package manager install for snapshot builds
-if (-not $useSnapshot -and -not $NoPkg) {
+if ($usePkg) {
     try-winget-install
     try-scoop-install
     Write-Info 'No supported package manager found. Falling back to binary download.'
@@ -458,8 +695,13 @@ try {
     } catch { Write-Verbose "Completions install skipped: $_" }
 
     Write-Host ''
+    # New binary is confirmed present; remove any existing install that a
+    # different method placed at a non-target location (deferred to here so a
+    # failed download or extract never tears down an existing working pinner).
+    Invoke-PinnerReconcile -TargetDirs $BinaryTarget
     Write-Ok "Pinner CLI $versionLabel installed successfully!"
     Show-NextSteps
+    exit 0
 } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }
