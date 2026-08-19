@@ -349,7 +349,7 @@ download_snapshot_artifact() {
     info "Downloading snapshot artifact..."
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail --silent --location $(curl_tls_flags) \
+        curl --fail --silent --location $(curl_tls_flags "$_url") \
             --connect-timeout 30 --max-time 300 \
             --output "$_outer_zip" "$_url"
     elif check_cmd wget; then
