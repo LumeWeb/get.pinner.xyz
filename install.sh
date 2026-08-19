@@ -723,9 +723,31 @@ uninstall_brew() {
     fi
 }
 
+# Remove a potentially root-owned system binary if the runtime user may act.
+# Returns 0 when the binary is gone, 1 when it is still present (no privileges
+# or removal failed). Non-interactive only: an install-time reconcile must never
+# block on a sudo password prompt mid-install. Written to take the path as an
+# argument and act directly (rather than returning a command prefix to splice)
+# because callers run under a newline-only IFS during reconcile, where word
+# splitting a "rm -f" prefix would treat it as a single bogus command name.
+rm_system_binary() {
+    _bin="$1"
+    if [ "$(id -u)" = 0 ]; then
+        rm -f "$_bin"
+    elif check_cmd sudo && sudo -n true 2> /dev/null; then
+        sudo rm -f "$_bin"
+    else
+        return 1
+    fi
+    [ ! -e "$_bin" ]
+}
+
 # dpkg-managed install (package pinner-cli -> /usr/bin).
-# $1 = elevate (1 to force-elevate on the explicit --uninstall path; 0 for
-# reconcile, tolerating unprivileged removal failure).
+# $1 = elevate (1 on the explicit --uninstall path; 0 for reconcile). Behavior
+# is driven by actual runtime privilege either way: when the package-manager
+# removal fails (e.g. stale package record) and the user may act, the leftover
+# binary is removed directly. A non-privileged user cannot remove a root-owned
+# /usr/bin binary, so reconcile stays non-fatal and reports a leftover.
 uninstall_dpkg() {
     _loc="/usr/bin"
     _elevate="${1:-0}"
@@ -733,36 +755,34 @@ uninstall_dpkg() {
     if check_cmd dpkg; then
         if [ "$(id -u)" = 0 ]; then
             dpkg -r pinner-cli 2> /dev/null && _ok=1
-        elif check_cmd sudo; then
+        elif check_cmd sudo && { [ "$_elevate" = 1 ] || sudo -n true 2> /dev/null; }; then
+            # Explicit --uninstall may prompt for sudo; a reconcile must not
+            # block on a password prompt mid-install, so it requires non-interactive.
             sudo dpkg -r pinner-cli 2> /dev/null && _ok=1
         fi
     fi
     if [ "$_ok" = 1 ]; then
         info "Uninstalled via dpkg (pinner-cli)."
         return 0
-    elif [ "$_elevate" = 1 ]; then
-        # Explicit --uninstall: attempt an escalated direct removal, but stay
-        # non-fatal. elevate_priv would `exit 1` when sudo is unavailable, which
-        # would abort the whole uninstall and strand every other method install
-        # on PATH; instead warn and report a leftover.
-        if [ "$(id -u)" = 0 ] || { check_cmd sudo && sudo -n true 2> /dev/null; }; then
+    fi
+    # Package-manager removal failed (or its record is stale). If the runtime
+    # user may act and a binary is left behind, remove it directly.
+    if [ -f "$_loc/$PROGRAM_NAME" ]; then
+        if rm_system_binary "$_loc/$PROGRAM_NAME"; then
             info "dpkg uninstall failed/absent. Removing binary directly."
-            sudo rm -f "$_loc/$PROGRAM_NAME"
             return 0
-        else
-            warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
-            return 1
         fi
-    else
         warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
-        # reconcile: signal a leftover that may shadow the new install.
         return 1
     fi
+    return 0
 }
 
 # rpm-managed install (package pinner-cli -> /usr/bin).
-# $1 = elevate (1 to force-elevate on the explicit --uninstall path; 0 for
-# reconcile, tolerating unprivileged removal failure).
+# $1 = elevate (1 on the explicit --uninstall path; 0 for reconcile). Same
+# privilege-driven direct-removal fallback as uninstall_dpkg: a stale rpm
+# record left after a dpkg removal (or on a dpkg-based host) must not leave a
+# shadowing /usr/bin/pinner behind when the user can act.
 uninstall_rpm() {
     _loc="/usr/bin"
     _elevate="${1:-0}"
@@ -770,31 +790,27 @@ uninstall_rpm() {
     if check_cmd rpm; then
         if [ "$(id -u)" = 0 ]; then
             rpm -e pinner-cli 2> /dev/null && _ok=1
-        elif check_cmd sudo; then
+        elif check_cmd sudo && { [ "$_elevate" = 1 ] || sudo -n true 2> /dev/null; }; then
+            # Explicit --uninstall may prompt for sudo; a reconcile must not
+            # block on a password prompt mid-install, so it requires non-interactive.
             sudo rpm -e pinner-cli 2> /dev/null && _ok=1
         fi
     fi
     if [ "$_ok" = 1 ]; then
         info "Uninstalled via rpm (pinner-cli)."
         return 0
-    elif [ "$_elevate" = 1 ]; then
-        # Explicit --uninstall: attempt an escalated direct removal, but stay
-        # non-fatal. elevate_priv would `exit 1` when sudo is unavailable, which
-        # would abort the whole uninstall and strand every other method install
-        # on PATH; instead warn and report a leftover.
-        if [ "$(id -u)" = 0 ] || { check_cmd sudo && sudo -n true 2> /dev/null; }; then
+    fi
+    # Package-manager removal failed (or its record is stale). If the runtime
+    # user may act and a binary is left behind, remove it directly.
+    if [ -f "$_loc/$PROGRAM_NAME" ]; then
+        if rm_system_binary "$_loc/$PROGRAM_NAME"; then
             info "rpm uninstall failed/absent. Removing binary directly."
-            sudo rm -f "$_loc/$PROGRAM_NAME"
             return 0
-        else
-            warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
-            return 1
         fi
-    else
         warn "No privileges to remove /usr/bin/$PROGRAM_NAME; leaving it in place (may shadow the new install)."
-        # reconcile: signal a leftover that may shadow the new install.
         return 1
     fi
+    return 0
 }
 
 # Dispatch an uninstall for a single detected method+location.

@@ -484,6 +484,102 @@ jobs:
                         exit 1
                       fi
 
+    test-sh-reconcile-system:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: "Reconcile cleans a stale system binary when privileged; stays non-fatal when not"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      set -e
+                      apt-get update >/dev/null && apt-get install -y curl unzip python3 sudo passwd >/dev/null
+                      TEST_VER="0.0.0-recon"
+                      TARBALL="pinner-cli_${TEST_VER}_linux_amd64.tar.gz"
+                      # Serve a local mirror so the install itself is deterministic
+                      # (same pattern as test-sh-reconcile).
+                      mkdir -p /srv/"v${TEST_VER}"
+                      printf '#!/bin/sh\necho "pinner %s"\n' "$TEST_VER" > /srv/pinner
+                      chmod +x /srv/pinner
+                      cp /srv/pinner /srv/"v${TEST_VER}"/
+                      ( cd /srv/"v${TEST_VER}" && tar -czf "$TARBALL" pinner )
+                      ( cd /srv/"v${TEST_VER}" && sha256sum "$TARBALL" | awk '{print $1"  "$2}' > checksums.txt )
+                      python3 -m http.server 18568 --bind 127.0.0.1 --directory /srv >/var/run/srv2.log 2>&1 &
+                      SRV=$!
+                      trap 'kill $SRV 2>/dev/null || true' EXIT
+                      for i in $(seq 1 30); do
+                        curl -sf -o /dev/null "http://127.0.0.1:18568/" && break
+                        sleep 0.5
+                      done
+
+                      # A stale rpm record: the scanner's `rpm -q pinner-cli` reports
+                      # the package (so reconcile targets /usr/bin), but `rpm -e`
+                      # fails -- the package is not actually removable, exactly the
+                      # dpkg-host-stale-rpm case from the field. A physical
+                      # /usr/bin/pinner binary is left behind to shadow PATH.
+                      printf '#!/bin/sh\nif [ "$1" = "-q" ]; then\n  echo "pinner-cli-0.1.0"\n  exit 0\nelif [ "$1" = "-e" ]; then\n  echo "error: package pinner-cli is not installed" >/dev/stderr\n  exit 1\nfi\nexit 0\n' > /usr/local/bin/rpm
+                      chmod +x /usr/local/bin/rpm
+                      printf '#!/bin/sh\necho "pinner v0.1.0"\n' > /usr/bin/pinner
+                      chmod +x /usr/bin/pinner
+
+                      # CASE 1 (privileged, the F2 fix): running as root, reconcile
+                      # fails the `rpm -e` but must remove the stale /usr/bin/pinner
+                      # directly instead of declaring "no privileges" and leaving it.
+                      echo "=== case 1: root reconcile removes stale system binary ==="
+                      export HOME=/root
+                      export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+                      if ! ALLOW_HTTP=1 sh /workspace/install.sh --no-pkg --version "$TEST_VER" --base-url "http://127.0.0.1:18568" >/tmp/s1.log 2>&1; then
+                        echo "install.sh failed in case 1; log:"; cat /tmp/s1.log; exit 1
+                      fi
+                      cat /tmp/s1.log
+                      if [ -x /usr/bin/pinner ]; then
+                        echo "FAIL: stale /usr/bin/pinner not removed by root reconcile"
+                        exit 1
+                      fi
+                      echo "PASS: stale /usr/bin/pinner removed by root reconcile"
+                      if grep -q "Reconciliation could not remove" /tmp/s1.log; then
+                        echo "FAIL: root reconcile still reported an unremovable leftover"
+                        exit 1
+                      fi
+                      echo "PASS: no leftover error under root"
+
+                      # CASE 2 (unprivileged): a non-root user without passwordless
+                      # sudo cannot remove a root-owned /usr/bin/pinner. The install
+                      # to their own ~/.local/bin must still succeed and reconcile
+                      # must stay non-fatal (warn + leftover, not abort).
+                      echo "=== case 2: non-root reconcile stays non-fatal ==="
+                      # /usr/sbin/useradd lives off the trimmed PATH above.
+                      /usr/sbin/useradd -m -s /bin/sh tester
+                      # Give tester a writable default install dir so the binary
+                      # install needs no sudo (which would mask the reconcile case
+                      # we are probing).
+                      mkdir -p /home/tester/.local/bin
+                      chown tester:tester /home/tester/.local/bin
+                      # CASE 1 removed the stale /usr/bin/pinner as root; recreate
+                      # it so the unprivileged reconcile has a leftover to face.
+                      # The fake rpm record still reports the package, so the scan
+                      # targets /usr/bin again.
+                      printf '#!/bin/sh\necho "pinner v0.1.0"\n' > /usr/bin/pinner
+                      chmod +x /usr/bin/pinner
+                      chmod 777 /usr/local/bin/rpm
+                      su tester -s /bin/sh -c \
+                        'HOME=/home/tester ALLOW_HTTP=1 sh /workspace/install.sh --no-pkg --version '"$TEST_VER"' --base-url http://127.0.0.1:18568 >/tmp/s2.log 2>&1' || {
+                          echo "non-root install failed; log:"; cat /tmp/s2.log; exit 1; }
+                      cat /tmp/s2.log
+                      if ! grep -q "Installed pinner to /home/tester/.local/bin/pinner" /tmp/s2.log; then
+                        echo "FAIL: non-root install did not land in tester's ~/.local/bin"
+                        exit 1
+                      fi
+                      if grep -q "Reconciliation could not remove" /tmp/s2.log; then
+                        echo "PASS: non-root reconcile reported unswept leftover (expected, non-fatal)"
+                      else
+                        echo "FAIL: expected a leftover warning for non-root user"
+                        exit 1
+                      fi
+                      echo "PASS: non-root reconcile was non-fatal; install completed"
+
     test-win-reconcile:
         runs-on: windows-latest
         steps:
