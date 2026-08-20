@@ -1093,8 +1093,13 @@ scan_pinner_locations() {
     if check_cmd dpkg && dpkg -l pinner-cli 2> /dev/null | grep -q '^ii'; then
         printf '%s|%s|%s|%s\n' dpkg /usr/bin "$(probe_version /usr/bin/pinner 2>/dev/null)" "$(dir_on_path /usr/bin && printf 1 || printf 0)"
     fi
-    # rpm (package pinner-cli -> /usr/bin)
-    if check_cmd rpm && rpm -q pinner-cli 2> /dev/null | grep -q 'pinner-cli'; then
+    # rpm (package pinner-cli -> /usr/bin). Only report the package as installed
+    # when `rpm -q` actually lists it (output starts with the package name). A
+    # bare `grep 'pinner-cli'` would also match rpm's "package pinner-cli is not
+    # installed" notice, inventing a phantom rpm install on any box that merely
+    # has the rpm binary but not the package (e.g. a Debian system where rpm is
+    # installed but unused).
+    if check_cmd rpm && rpm -q pinner-cli 2> /dev/null | grep -q '^pinner-cli'; then
         printf '%s|%s|%s|%s\n' rpm /usr/bin "$(probe_version /usr/bin/pinner 2>/dev/null)" "$(dir_on_path /usr/bin && printf 1 || printf 0)"
     fi
 }
@@ -1136,7 +1141,7 @@ EOF
         [ "$_is_target" = 1 ] && continue
 
         # Different-method install elsewhere on PATH -> remove it.
-        warn "Removing existing pinner installed via '$_m' at $_l (target for this run differs)."
+        warn "Removing existing pinner installed via '$_m' at $_l so it does not shadow this install."
         info "User config (~/.config/pinner) will be preserved."
         # Skip completion removal: the fresh install wrote user-level
         # completions moments ago, so a reconciling removal must not delete them.
