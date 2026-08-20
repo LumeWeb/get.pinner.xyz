@@ -405,6 +405,80 @@ jobs:
                         exit 1
                       fi
 
+            - name: "Scanner: rpm present but package absent -> no phantom rpm entry"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      # Mock rpm: `-q <pkg>` prints the real "not installed" notice
+                      # (exit 1) unless a marker file says the package is installed.
+                      # This reproduces a Debian box that has the rpm binary but no
+                      # pinner-cli package -- which used to invent a phantom rpm
+                      # install because 'package pinner-cli is not installed'
+                      # contains the string "pinner-cli".
+                      cat > /usr/local/bin/rpm <<'EOF'
+                      #!/bin/sh
+                      if [ "$1" = "-q" ]; then
+                        pkg="$2"
+                        if [ -f /var/mock-rpm-installed ]; then
+                          echo "${pkg}-1.0.0"
+                          exit 0
+                        fi
+                        echo "package ${pkg} is not installed"
+                        exit 1
+                      fi
+                      exit 0
+                      EOF
+                      chmod +x /usr/local/bin/rpm
+                      export HOME=/root
+                      output=$(PINNER_SELF_TEST=1 sh /workspace/install.sh)
+                      if echo "$output" | grep -q "^rpm|"; then
+                        echo "FAIL: phantom rpm entry emitted when package absent"
+                        echo "output: $output"
+                        exit 1
+                      fi
+                      echo "PASS: no phantom rpm entry when package absent"
+
+            - name: "Scanner: rpm present and package installed -> rpm entry emitted"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      apt-get update && apt-get install -y curl
+                      # Same mock rpm; now the package is genuinely installed so
+                      # `rpm -q pinner-cli` returns "pinner-cli-<ver>" (prefix match).
+                      # Guards against over-anchoring: a real rpm install must still
+                      # be detected.
+                      cat > /usr/local/bin/rpm <<'EOF'
+                      #!/bin/sh
+                      if [ "$1" = "-q" ]; then
+                        pkg="$2"
+                        if [ -f /var/mock-rpm-installed ]; then
+                          echo "${pkg}-1.0.0"
+                          exit 0
+                        fi
+                        echo "package ${pkg} is not installed"
+                        exit 1
+                      fi
+                      exit 0
+                      EOF
+                      chmod +x /usr/local/bin/rpm
+                      touch /var/mock-rpm-installed
+                      printf '#!/bin/sh\necho "pinner v1.0.0"\n' > /usr/bin/pinner
+                      chmod +x /usr/bin/pinner
+                      export HOME=/root
+                      output=$(PINNER_SELF_TEST=1 sh /workspace/install.sh)
+                      if echo "$output" | grep -q "^rpm|/usr/bin|"; then
+                        echo "PASS: scanner detected genuine rpm install"
+                      else
+                        echo "FAIL: genuine rpm install not detected"
+                        echo "output: $output"
+                        exit 1
+                      fi
+
     test-sh-reconcile:
         runs-on: ubuntu-latest
         steps:
