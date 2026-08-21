@@ -388,7 +388,7 @@ jobs:
         steps:
             - uses: actions/checkout@v5
 
-            - name: "Non-TTY: download stays silent, spinner wrapper is a no-op passthrough"
+            - name: "Non-TTY: downloads stay silent (no tool progress frames) and spinner wrapper is a no-op passthrough"
               uses: vjik/docker-run@v1
               with:
                   image: debian:12-slim
@@ -396,21 +396,28 @@ jobs:
                   command: |
                       set -eu
                       apt-get update >/dev/null && apt-get install -y curl >/dev/null
-                      # Pull the two progress helpers out of the shipped script so we
-                      # test the real code, not a drift-prone copy.
-                      awk '/^curl_progress_flag\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh > /tmp/prog.sh
-                      awk '/^run_with_spinner\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh >> /tmp/prog.sh
-                      . /tmp/prog.sh
-
-                      # Progress flag: non-TTY output should be --silent (no bar noise
-                      # in logs / CI), not --progress-bar.
-                      flag="$(curl_progress_flag)"
-                      if [ "$flag" = "--silent" ]; then
-                        echo "PASS: curl_progress_flag is --silent on non-TTY"
-                      else
-                        echo "FAIL: curl_progress_flag on non-TTY = '$flag'"
+                      # Download progress is rendered by our own run_with_spinner, so the
+                      # download tools must stay silent: no curl --progress-bar and no
+                      # wget --no-verbose (both emit terminal-control frames that render
+                      # as scrambled garbage like `##0=-##` mid-transfer). Assert the
+                      # shipped script never enables either.
+                      if grep -qE '(--progress-bar|--no-verbose)' /workspace/install.sh; then
+                        echo "FAIL: install.sh still enables a tool-owned progress bar"
+                        grep -nE '(--progress-bar|--no-verbose)' /workspace/install.sh
                         exit 1
                       fi
+                      # And curl/wget downloads must be silent.
+                      if ! grep -q 'curl --fail --silent --show-error' /workspace/install.sh || \
+                         ! grep -q 'wget --quiet' /workspace/install.sh; then
+                        echo "FAIL: downloads not fully silent"
+                        exit 1
+                      fi
+                      echo "PASS: downloads stay silent; progress comes from run_with_spinner"
+
+                      # Pull the spinner helper out of the shipped script so we test the
+                      # real code, not a drift-prone copy.
+                      sed -n '/^run_with_spinner()/,/^}/p' /workspace/install.sh > /tmp/prog.sh
+                      . /tmp/prog.sh
 
                       # run_with_spinner on non-TTY is a pure passthrough: exit status
                       # propagates, and no spinner bytes leak into captured output.
