@@ -187,9 +187,18 @@ download_with_progress() {
     # to stdout; avoid `-o /dev/null` which would swallow them. Bound the probe
     # with explicit timeouts so a dead/unreachable host fails over to the
     # spinner quickly instead of blocking on curl's default delays.
+    #
+    # Only trust the Content-Length when the final response is an HTTP 2xx:
+    # some mirrors (nightly.link) answer HEAD with a 404/error page whose
+    # rudimentary body is tiny, so trusting that length fabricates an absurd
+    # percent (e.g. `34876050%`) once the real download dwarf's it.
     _total=""
     if check_cmd curl && ! curl_is_snap && [ -n "$_url" ]; then
-        _total="$(curl -sIL --connect-timeout 10 --max-time 30 "$_url" 2>/dev/null | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
+        _head="$(curl -sIL --connect-timeout 10 --max-time 30 -w '\nHTTPCODE:%{http_code}' "$_url" 2>/dev/null)"
+        _status="${_head##*HTTPCODE:}"
+        if [ "$_status" -ge 200 ] 2>/dev/null && [ "$_status" -lt 300 ] 2>/dev/null; then
+            _total="$(printf '%s' "${_head%HTTPCODE:*}" | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
+        fi
     fi
     _total="${_total%%[!0-9]*}"
     if [ -n "$_total" ] && [ "$_total" -gt 0 ] 2>/dev/null; then
@@ -202,7 +211,10 @@ download_with_progress() {
             if [ -f "$_file" ]; then
                 _done="$(wc -c < "$_file" 2>/dev/null || echo 0)"
             fi
+            # Clamp to 100 so a stale/under-reported total can never render a
+            # percent above 100 (guard against a size mismatch we didn't catch).
             _pct=$(( _done * 100 / _total ))
+            [ "$_pct" -gt 100 ] && _pct=100
             printf '\r%s  %3d%%' "$_label" "$_pct" >&2
             sleep "${SPINNER_INTERVAL:-0.1}"
         done
