@@ -184,10 +184,12 @@ download_with_progress() {
     # Try to learn the total transfer size via a HEAD request (curl only; wget
     # has no cheap header probe here). A chunked/no-length response leaves this
     # empty and we fall back to the indeterminate spinner. `-I` prints headers
-    # to stdout; avoid `-o /dev/null` which would swallow them.
+    # to stdout; avoid `-o /dev/null` which would swallow them. Bound the probe
+    # with explicit timeouts so a dead/unreachable host fails over to the
+    # spinner quickly instead of blocking on curl's default delays.
     _total=""
     if check_cmd curl && ! curl_is_snap && [ -n "$_url" ]; then
-        _total="$(curl -sIL "$_url" 2>/dev/null | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
+        _total="$(curl -sIL --connect-timeout 10 --max-time 30 "$_url" 2>/dev/null | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
     fi
     _total="${_total%%[!0-9]*}"
     if [ -n "$_total" ] && [ "$_total" -gt 0 ] 2>/dev/null; then
