@@ -119,7 +119,7 @@ run_with_spinner() {
                 1) _c='|' ;;
                 2) _c='/' ;;
                 3) _c='-' ;;
-                *) _c="$(printf '\\134')" ;;
+                *) _c="$(printf '\134')" ;;
             esac
             printf '\r%s %s' "$_label" "$_c" >&2
             sleep "${SPINNER_INTERVAL:-0.1}"
