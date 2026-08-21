@@ -183,7 +183,7 @@ download() {
 
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        run_with_spinner "Downloading" curl --fail --silent --show-error $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
+        run_with_spinner "Downloading" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
         run_with_spinner "Downloading" wget --quiet --timeout=30 --output-document="$_file" "$_url"
     elif check_cmd fetch; then
