@@ -91,18 +91,11 @@ ignore() {
 
 # --- Download progress -------------------------------------------------------
 
-# Emit the curl flag that shows a live download progress bar on an interactive
-# terminal, or silences curl when output is not a TTY (CI, pipes, captured
-# logs). curl only renders --progress-bar meaningfully on a terminal; piping it
-# into a log file just adds carriage-return noise, so we keep downloads quiet
-# there. Prints the flag (no newline).
-curl_progress_flag() {
-    if [ -t 2 ]; then
-        printf '%s' '--progress-bar'
-    else
-        printf '%s' '--silent'
-    fi
-}
+# Downloads and extractions are wrapped in run_with_spinner (below) so the only
+# progress rendering is our own deterministic `\r`-animation on stderr. curl and
+# wget are always run silent so they never spew their own terminal-control
+# progress frames, which render as scrambled garbage (`##0=-##`) on some
+# terminals mid-transfer.
 
 # Run a command, animating an indeterminate progress spinner on stderr only when
 # stderr is attached to a terminal. In non-interactive contexts (CI, redirects,
@@ -190,15 +183,11 @@ download() {
 
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail $(curl_progress_flag) --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
+        run_with_spinner "Downloading" curl --fail --silent --show-error $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
-        if [ -t 2 ]; then
-            wget --no-verbose --timeout=30 --output-document="$_file" "$_url"
-        else
-            wget --quiet --timeout=30 --output-document="$_file" "$_url"
-        fi
+        run_with_spinner "Downloading" wget --quiet --timeout=30 --output-document="$_file" "$_url"
     elif check_cmd fetch; then
-        fetch --quiet --timeout=30 --output="$_file" "$_url"
+        run_with_spinner "Downloading" fetch --quiet --timeout=30 --output="$_file" "$_url"
     else
         error "No download tool found. Install curl, wget, or fetch."
         exit 1
@@ -406,27 +395,20 @@ download_snapshot_artifact() {
 
     # Download via nightly.link — no auth required
     _outer_zip="${_tmpdir}/snapshot-artifact.zip"
-    info "Downloading snapshot artifact..."
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail $(curl_progress_flag) --location $(curl_tls_flags "$_url") \
+        run_with_spinner "Downloading snapshot" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") \
             --connect-timeout 30 --max-time 300 \
             --output "$_outer_zip" "$_url"
     elif check_cmd wget; then
-        if [ -t 2 ]; then
-            wget --no-verbose --timeout=30 \
-                --output-document="$_outer_zip" "$_url"
-        else
-            wget --quiet --timeout=30 \
-                --output-document="$_outer_zip" "$_url"
-        fi
+        run_with_spinner "Downloading snapshot" wget --quiet --timeout=30 \
+            --output-document="$_outer_zip" "$_url"
     else
         error "No download tool found (curl or wget required)."
         exit 1
     fi
 
     # Extract outer ZIP (contains the dist/ directory from GoReleaser)
-    info "Extracting artifact..."
     if check_cmd unzip; then
         run_with_spinner "Extracting artifact" unzip -q -o "$_outer_zip" -d "${_tmpdir}/artifact"
     elif check_cmd python3; then
