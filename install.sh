@@ -89,6 +89,62 @@ ignore() {
     "$@" 2> /dev/null || true
 }
 
+# --- Download progress -------------------------------------------------------
+
+# Emit the curl flag that shows a live download progress bar on an interactive
+# terminal, or silences curl when output is not a TTY (CI, pipes, captured
+# logs). curl only renders --progress-bar meaningfully on a terminal; piping it
+# into a log file just adds carriage-return noise, so we keep downloads quiet
+# there. Prints the flag (no newline).
+curl_progress_flag() {
+    if [ -t 2 ]; then
+        printf '%s' '--progress-bar'
+    else
+        printf '%s' '--silent'
+    fi
+}
+
+# Run a command, animating an indeterminate progress spinner on stderr only when
+# stderr is attached to a terminal. In non-interactive contexts (CI, redirects,
+# pipes) the command runs directly with no spinner, keeping output deterministic
+# and log-clean. The wrapped command's stdout/stderr are captured to a temp file
+# so a failure still surfaces the underlying tool's error text.
+# Usage: run_with_spinner <label> <cmd...>
+# Returns the wrapped command's exit status.
+run_with_spinner() {
+    _label="$1"
+    shift
+    if [ -t 2 ]; then
+        _out="$(mktemp)"
+        printf '%s ' "$_label" >&2
+        "$@" > "$_out" 2>&1 &
+        _pid=$!
+        _i=0
+        while kill -0 "$_pid" 2> /dev/null; do
+            _i=$(( (_i + 1) % 4 ))
+            case "$_i" in
+                1) _c='|' ;;
+                2) _c='/' ;;
+                3) _c='-' ;;
+                *) _c="$(printf '\\134')" ;;
+            esac
+            printf '\r%s %s' "$_label" "$_c" >&2
+            sleep "${SPINNER_INTERVAL:-0.1}"
+        done
+        wait "$_pid"
+        _rc=$?
+        # Clear the spinner line, then show errors if the command failed.
+        printf '\r\033[K' >&2
+        if [ "$_rc" != 0 ] && [ -s "$_out" ]; then
+            sed 's/^/  /' "$_out" >&2
+        fi
+        rm -f "$_out"
+        return "$_rc"
+    fi
+    "$@"
+    return $?
+}
+
 # --- Download abstraction ----------------------------------------------------
 
 curl_is_snap() {
@@ -134,9 +190,13 @@ download() {
 
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail --silent --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
+        curl --fail $(curl_progress_flag) --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
-        wget --quiet --timeout=30 --output-document="$_file" "$_url"
+        if [ -t 2 ]; then
+            wget --no-verbose --timeout=30 --output-document="$_file" "$_url"
+        else
+            wget --quiet --timeout=30 --output-document="$_file" "$_url"
+        fi
     elif check_cmd fetch; then
         fetch --quiet --timeout=30 --output="$_file" "$_url"
     else
@@ -349,12 +409,17 @@ download_snapshot_artifact() {
     info "Downloading snapshot artifact..."
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        curl --fail --silent --location $(curl_tls_flags "$_url") \
+        curl --fail $(curl_progress_flag) --location $(curl_tls_flags "$_url") \
             --connect-timeout 30 --max-time 300 \
             --output "$_outer_zip" "$_url"
     elif check_cmd wget; then
-        wget --quiet --timeout=30 \
-            --output-document="$_outer_zip" "$_url"
+        if [ -t 2 ]; then
+            wget --no-verbose --timeout=30 \
+                --output-document="$_outer_zip" "$_url"
+        else
+            wget --quiet --timeout=30 \
+                --output-document="$_outer_zip" "$_url"
+        fi
     else
         error "No download tool found (curl or wget required)."
         exit 1
@@ -363,9 +428,9 @@ download_snapshot_artifact() {
     # Extract outer ZIP (contains the dist/ directory from GoReleaser)
     info "Extracting artifact..."
     if check_cmd unzip; then
-        unzip -q -o "$_outer_zip" -d "${_tmpdir}/artifact"
+        run_with_spinner "Extracting artifact" unzip -q -o "$_outer_zip" -d "${_tmpdir}/artifact"
     elif check_cmd python3; then
-        python3 -c "import zipfile; zipfile.ZipFile('$_outer_zip').extractall('${_tmpdir}/artifact')"
+        run_with_spinner "Extracting artifact" python3 -c "import zipfile; zipfile.ZipFile('$_outer_zip').extractall('${_tmpdir}/artifact')"
     else
         error "Cannot extract ZIP: install unzip or python3."
         exit 1
@@ -1433,15 +1498,15 @@ main() {
     info "Extracting..."
     case "$_archive" in
         *.tar.gz)
-            tar -xzf "$_archive" -C "$_tmpdir"
+            run_with_spinner "Extracting" tar -xzf "$_archive" -C "$_tmpdir"
             ;;
         *.zip)
             _extract_dir="${_tmpdir}/extract"
             mkdir -p "$_extract_dir"
             if check_cmd unzip; then
-                unzip -q -o "$_archive" -d "$_extract_dir"
+                run_with_spinner "Extracting" unzip -q -o "$_archive" -d "$_extract_dir"
             elif check_cmd python3; then
-                python3 -c "import zipfile; zipfile.ZipFile('$_archive').extractall('$_extract_dir')"
+                run_with_spinner "Extracting" python3 -c "import zipfile; zipfile.ZipFile('$_archive').extractall('$_extract_dir')"
             else
                 error "Cannot extract ZIP: install unzip or python3."
                 exit 1
