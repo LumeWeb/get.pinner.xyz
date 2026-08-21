@@ -161,6 +161,64 @@ curl_tls_flags() {
     fi
 }
 
+# Download a URL to a file, rendering a real determinate percentage on stderr
+# when it's an interactive terminal. The download tool itself runs silent; we
+# background it and poll the output file's size against the server's
+# Content-Length, drawing `\r<label> 42%` with our own frames. This keeps all
+# tool-owned terminal-control progress codes off the display (they render as
+# garbage like `##0=-##` on some terminals). Off a TTY the command runs
+# directly and quietly (CI/pipes stay deterministic). If the total length can't
+# be determined, it falls back to an indeterminate spinner.
+# Usage: download_with_progress <label> <url> <outfile> <cmd...>
+# Returns the download command's exit status.
+download_with_progress() {
+    _label="$1"
+    _url="$2"
+    _file="$3"
+    shift 3
+    if [ ! -t 2 ]; then
+        "$@"
+        return $?
+    fi
+
+    # Try to learn the total transfer size via a HEAD request (curl only; wget
+    # has no cheap header probe here). A chunked/no-length response leaves this
+    # empty and we fall back to the indeterminate spinner. `-I` prints headers
+    # to stdout; avoid `-o /dev/null` which would swallow them.
+    _total=""
+    if check_cmd curl && ! curl_is_snap && [ -n "$_url" ]; then
+        _total="$(curl -sIL "$_url" 2>/dev/null | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
+    fi
+    _total="${_total%%[!0-9]*}"
+    if [ -n "$_total" ] && [ "$_total" -gt 0 ] 2>/dev/null; then
+        _out="$(mktemp)"
+        : > "$_file" 2>/dev/null || true
+        "$@" > "$_out" 2>&1 &
+        _pid=$!
+        while kill -0 "$_pid" 2>/dev/null; do
+            _done=0
+            if [ -f "$_file" ]; then
+                _done="$(wc -c < "$_file" 2>/dev/null || echo 0)"
+            fi
+            _pct=$(( _done * 100 / _total ))
+            printf '\r%s  %3d%%' "$_label" "$_pct" >&2
+            sleep "${SPINNER_INTERVAL:-0.1}"
+        done
+        wait "$_pid"
+        _rc=$?
+        printf '\r\033[K' >&2
+        if [ "$_rc" != 0 ] && [ -s "$_out" ]; then
+            sed 's/^/  /' "$_out" >&2
+        fi
+        rm -f "$_out"
+        return "$_rc"
+    fi
+
+    # Total unknown: fall back to the animate-while-running spinner.
+    run_with_spinner "$_label" "$@"
+    return $?
+}
+
 download() {
     _url="$1"
     _file="$2"
@@ -183,11 +241,11 @@ download() {
 
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        run_with_spinner "Downloading" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
+        download_with_progress "Downloading" "$_url" "$_file" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") --connect-timeout 30 --max-time 300 --output "$_file" "$_url"
     elif check_cmd wget; then
-        run_with_spinner "Downloading" wget --quiet --timeout=30 --output-document="$_file" "$_url"
+        download_with_progress "Downloading" "$_url" "$_file" wget --quiet --timeout=30 --output-document="$_file" "$_url"
     elif check_cmd fetch; then
-        run_with_spinner "Downloading" fetch --quiet --timeout=30 --output="$_file" "$_url"
+        download_with_progress "Downloading" "$_url" "$_file" fetch --quiet --timeout=30 --output="$_file" "$_url"
     else
         error "No download tool found. Install curl, wget, or fetch."
         exit 1
@@ -397,11 +455,11 @@ download_snapshot_artifact() {
     _outer_zip="${_tmpdir}/snapshot-artifact.zip"
     if check_cmd curl && ! curl_is_snap; then
         # shellcheck disable=SC2046
-        run_with_spinner "Downloading snapshot" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") \
+        download_with_progress "Downloading snapshot" "$_url" "$_outer_zip" curl --fail --silent --show-error --location $(curl_tls_flags "$_url") \
             --connect-timeout 30 --max-time 300 \
             --output "$_outer_zip" "$_url"
     elif check_cmd wget; then
-        run_with_spinner "Downloading snapshot" wget --quiet --timeout=30 \
+        download_with_progress "Downloading snapshot" "$_url" "$_outer_zip" wget --quiet --timeout=30 \
             --output-document="$_outer_zip" "$_url"
     else
         error "No download tool found (curl or wget required)."

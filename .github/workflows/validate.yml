@@ -396,9 +396,9 @@ jobs:
                   command: |
                       set -eu
                       apt-get update >/dev/null && apt-get install -y curl >/dev/null
-                      # Download progress is rendered by our own run_with_spinner, so the
-                      # download tools must stay silent: no curl --progress-bar and no
-                      # wget --no-verbose (both emit terminal-control frames that render
+                      # Download progress is rendered by our own download_with_progress,
+                      # so the download tools must stay silent: no curl --progress-bar and
+                      # no wget --no-verbose (both emit terminal-control frames that render
                       # as scrambled garbage like `##0=-##` mid-transfer). Assert the
                       # shipped script never enables either.
                       if grep -qE '(--progress-bar|--no-verbose)' /workspace/install.sh; then
@@ -412,7 +412,7 @@ jobs:
                         echo "FAIL: downloads not fully silent"
                         exit 1
                       fi
-                      echo "PASS: downloads stay silent; progress comes from run_with_spinner"
+                      echo "PASS: downloads stay silent; progress comes from download_with_progress"
 
                       # Pull the spinner helper out of the shipped script so we test the
                       # real code, not a drift-prone copy.
@@ -470,6 +470,44 @@ jobs:
                       done
                       echo "PASS: spinner animated | / - \\ on a TTY stderr (no backslash-escape leak)"
 
+            - name: "TTY: download_with_progress renders a real percent, no tool progress frames"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      set -eu
+                      apt-get update >/dev/null && apt-get install -y curl util-linux python3 >/dev/null
+                      # Pull the download helpers out of the shipped script (drift-proof).
+                      for fn in check_cmd curl_is_snap run_with_spinner curl_tls_flags download_with_progress; do
+                        sed -n "/^${fn}()/,/^}/p" /workspace/install.sh >> /tmp/prog.sh
+                      done
+                      . /tmp/prog.sh
+                      # Serve a throttled file so the download lasts long enough to poll.
+                      mkdir -p /srv && dd if=/dev/urandom of=/srv/art.bin bs=1024 count=1000 2>/dev/null
+                      python3 -m http.server 8799 --directory /srv >/tmp/srv.log 2>&1 &
+                      SPID=$!
+                      for i in $(seq 1 20); do curl -s -o /dev/null http://127.0.0.1:8799/art.bin && break; sleep 0.5; done
+                      # Build the pty harness with printf (a heredoc terminator can be
+                      # mangled by YAML indentation), then run it under a pseudo-tty so
+                      # download_with_progress renders its percent frames to stderr.
+                      printf '%s\n' '. /tmp/prog.sh' \
+                        'SPINNER_INTERVAL=0.02' \
+                        'download_with_progress "Downloading" "http://127.0.0.1:8799/art.bin" /tmp/out.bin \\' \
+                        '  curl --fail --silent --show-error --location --limit-rate 50k --output /tmp/out.bin http://127.0.0.1:8799/art.bin' \
+                        'echo "DOWNLOAD_OK=$?"' > /tmp/dl.harness
+                      script -qec "sh /tmp/dl.harness" /dev/null >/tmp/dl.out 2>&1
+                      if ! grep -q DOWNLOAD_OK /tmp/dl.out; then
+                        echo "FAIL: download did not complete"; cat -v /tmp/dl.out; exit 1
+                      fi
+                      # Must render real percents, and never leak tool-owned `##` frames.
+                      if ! grep -qE '[0-9]+%' /tmp/dl.out; then
+                        echo "FAIL: no percentage rendered"; cat -v /tmp/dl.out; exit 1
+                      fi
+                      if grep -qE '##' /tmp/dl.out; then
+                        echo "FAIL: tool progress-frame garbage present"; cat -v /tmp/dl.out; exit 1
+                      fi
+                      echo "PASS: download rendered a real percent (no tool progress frames)"
     test-sh-scanner:
         runs-on: ubuntu-latest
         steps:
