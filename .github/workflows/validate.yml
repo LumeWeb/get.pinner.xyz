@@ -443,7 +443,7 @@ jobs:
                   command: |
                       set -eu
                       apt-get update >/dev/null && apt-get install -y curl util-linux >/dev/null
-                      awk '/^run_with_spinner\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh > /tmp/tty-spin.sh
+                      sed -n '/^run_with_spinner()/,/^}/p' /workspace/install.sh > /tmp/tty-spin.sh
                       cat >> /tmp/tty-spin.sh <<'HARNESS'
                       SPINNER_INTERVAL=0.01
                       run_with_spinner "Extracting" sleep 0.3
@@ -454,12 +454,21 @@ jobs:
                       if ! grep -q SPIN_COMPLETE /tmp/tty.out; then
                         echo "FAIL: pty run did not complete"; cat -v /tmp/tty.out; exit 1
                       fi
-                      # Spinner writes rotating chars (| / - \ ) followed by CR line clears.
-                      if grep -qE '\|' /tmp/tty.out || grep -qE '/' /tmp/tty.out; then
-                        echo "PASS: spinner animated on a TTY stderr"
-                      else
-                        echo "FAIL: no spinner chars on TTY output:"; cat -v /tmp/tty.out; exit 1
+                      # Spinner cycles | / - \\ and must never leak the literal octal
+                      # escape (a printf portability bug that renders as `\134` instead
+                      # of a real backslash).
+                      if grep -q '134' /tmp/tty.out; then
+                        echo "FAIL: literal octal escape leaked instead of a backslash"
+                        cat -v /tmp/tty.out; exit 1
                       fi
+                      frames="$(grep -oE '[|/\\-]' /tmp/tty.out | sort -u)"
+                      for ch in '|' '/' '-' '\'; do
+                        printf '%s' "$frames" | grep -qF "$ch" || {
+                          echo "FAIL: spinner frame '$ch' never rendered"
+                          cat -v /tmp/tty.out; exit 1
+                        }
+                      done
+                      echo "PASS: spinner animated | / - \\ on a TTY stderr (no backslash-escape leak)"
 
     test-sh-scanner:
         runs-on: ubuntu-latest
