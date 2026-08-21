@@ -33,6 +33,49 @@ function Write-Warn($Msg) { Write-Host "[warn]  $Msg" -ForegroundColor Yellow }
 function Write-Err($Msg)  { Write-Host "[error] $Msg" -ForegroundColor Red }
 function Write-Ok($Msg)   { Write-Host "[ok]    $Msg" -ForegroundColor Green }
 
+# --- Download / extraction progress ------------------------------------------
+#
+# Interactive archives show a live determinate progress bar. Invoke-WebRequest
+# renders one natively, so we only force $ProgressPreference on globally; for
+# extraction we drive Write-Progress per archive entry. Every progress helper
+# accepts a -ProgressSink scriptblock (defaults to Write-Progress) so CI can
+# inject a recording sink and assert the bar advances start -> end in steps.
+$ProgressPreference = 'Continue'
+
+function Expand-ArchiveWithProgress {
+    # Extract a ZIP to a directory, reporting per-entry progress. A determinate
+    # bar (current entry / total entries) is better than zero feedback, and the
+    # -ProgressSink hook keeps it unit-testable in non-interactive CI.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [scriptblock]$ProgressSink = {
+            param($id, $activity, $current, $total)
+            Write-Progress -Id $id -Activity $activity `
+                -PercentComplete ([int][math]::Round(100 * $current / $total))
+        }
+    )
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $id = Get-Random -Maximum 10000
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $total = $zip.Entries.Count
+        $count = 0
+        foreach ($entry in $zip.Entries) {
+            $dest = Join-Path $DestinationPath $entry.FullName
+            $parent = Split-Path $dest -Parent
+            if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            if ($entry.Name) {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
+            }
+            $count++
+            if ($total -gt 0) { & $ProgressSink $id 'Extracting' $count $total }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
 function Test-NewInstall {
     $configDir = Join-Path $env:USERPROFILE '.config\pinner'
     $configFile = Join-Path $configDir 'config.yaml'
@@ -373,7 +416,7 @@ function Download-SnapshotArtifact {
     # Extract outer ZIP (contains dist/ directory from GoReleaser)
     Write-Info 'Extracting artifact...'
     $artifactDir = Join-Path $TmpDir 'artifact'
-    Expand-Archive -Path $outerZip -DestinationPath $artifactDir -Force
+    Expand-ArchiveWithProgress -Path $outerZip -DestinationPath $artifactDir
 
     # Find the inner archive for windows / current arch
     $pattern = "$($Script:ArchiveName)_*_windows_$Arch"
@@ -662,7 +705,7 @@ try {
 
     Write-Info 'Extracting...'
     $extractDir = Join-Path $tmpDir 'extract'
-    Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+    Expand-ArchiveWithProgress -Path $archivePath -DestinationPath $extractDir
 
     $binary = Get-ChildItem -Path $extractDir -Filter "$Script:ProgramName.exe" -Recurse | Select-Object -First 1
     if (-not $binary) { $binary = Get-ChildItem -Path $extractDir -Filter $Script:ProgramName -Recurse | Select-Object -First 1 }

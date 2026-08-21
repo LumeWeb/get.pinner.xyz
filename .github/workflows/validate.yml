@@ -383,6 +383,77 @@ jobs:
                         exit 1
                       fi
 
+    test-sh-progress:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: "Non-TTY: download stays silent, spinner wrapper is a no-op passthrough"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      set -eu
+                      apt-get update >/dev/null && apt-get install -y curl >/dev/null
+                      # Pull the two progress helpers out of the shipped script so we
+                      # test the real code, not a drift-prone copy.
+                      awk '/^curl_progress_flag\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh > /tmp/prog.sh
+                      awk '/^run_with_spinner\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh >> /tmp/prog.sh
+                      . /tmp/prog.sh
+
+                      # Progress flag: non-TTY output should be --silent (no bar noise
+                      # in logs / CI), not --progress-bar.
+                      flag="$(curl_progress_flag)"
+                      if [ "$flag" = "--silent" ]; then
+                        echo "PASS: curl_progress_flag is --silent on non-TTY"
+                      else
+                        echo "FAIL: curl_progress_flag on non-TTY = '$flag'"
+                        exit 1
+                      fi
+
+                      # run_with_spinner on non-TTY is a pure passthrough: exit status
+                      # propagates, and no spinner bytes leak into captured output.
+                      if ! run_with_spinner "Extracting" true; then
+                        echo "FAIL: true should pass"; exit 1
+                      fi
+                      if run_with_spinner "Extracting" false 2>/tmp/spin-err; then
+                        echo "FAIL: false should fail"; exit 1
+                      fi
+                      # No spinner control chars (CR, ESC) on a non-TTY stderr.
+                      if grep -qE $'\r|\x1b' /tmp/spin-err; then
+                        echo "FAIL: spinner control chars leaked on non-TTY stderr"
+                        cat -v /tmp/spin-err
+                        exit 1
+                      fi
+                      echo "PASS: run_with_spinner is a clean passthrough on non-TTY"
+
+            - name: "TTY: spinner animates on stderr and command completes"
+              uses: vjik/docker-run@v1
+              with:
+                  image: debian:12-slim
+                  volumes: ${{ github.workspace }}:/workspace
+                  command: |
+                      set -eu
+                      apt-get update >/dev/null && apt-get install -y curl util-linux >/dev/null
+                      awk '/^run_with_spinner\(\)/{f=1} f{print} f&&/^}/{exit}' /workspace/install.sh > /tmp/tty-spin.sh
+                      cat >> /tmp/tty-spin.sh <<'HARNESS'
+                      SPINNER_INTERVAL=0.01
+                      run_with_spinner "Extracting" sleep 0.3
+                      echo "SPIN_COMPLETE"
+                      HARNESS
+                      # script allocates a pty so [ -t 2 ] is true; capture stderr.
+                      script -qec "sh /tmp/tty-spin.sh" /dev/null >/tmp/tty.out 2>&1
+                      if ! grep -q SPIN_COMPLETE /tmp/tty.out; then
+                        echo "FAIL: pty run did not complete"; cat -v /tmp/tty.out; exit 1
+                      fi
+                      # Spinner writes rotating chars (| / - \ ) followed by CR line clears.
+                      if grep -qE '\|' /tmp/tty.out || grep -qE '/' /tmp/tty.out; then
+                        echo "PASS: spinner animated on a TTY stderr"
+                      else
+                        echo "FAIL: no spinner chars on TTY output:"; cat -v /tmp/tty.out; exit 1
+                      fi
+
     test-sh-scanner:
         runs-on: ubuntu-latest
         steps:
@@ -653,6 +724,46 @@ jobs:
                         exit 1
                       fi
                       echo "PASS: non-root reconcile was non-fatal; install completed"
+
+    test-windows-progress:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Expand-ArchiveWithProgress drives a determinate 0->100 bar and extracts
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  # Pull the real helper out of the shipped script so we test the actual
+                  # code, not a copy that could drift.
+                  $src = Get-Content -Raw ./install.ps1
+                  $m = [regex]::Match($src, 'function Expand-ArchiveWithProgress \{.*?\n\}', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+                  if (-not $m.Success) { Write-Host 'FAIL: could not extract helper'; exit 1 }
+                  Invoke-Expression $m.Value
+
+                  $srcDir = Join-Path $env:TEMP 'zip-src'
+                  New-Item -ItemType Directory -Path $srcDir -Force | Out-Null
+                  1..3 | ForEach-Object { Set-Content -Path (Join-Path $srcDir "file$_.txt") -Value "content$_" }
+                  $zipPath = Join-Path $env:TEMP 'prog.zip'
+                  Compress-Archive -Path (Join-Path $srcDir '*') -DestinationPath $zipPath -Force
+                  $dest = Join-Path $env:TEMP 'zip-out'
+                  New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+                  # Recording sink: captures every percent step the helper reports.
+                  $recorded = New-Object System.Collections.Generic.List[object]
+                  $sink = {
+                      param($id, $activity, $current, $total)
+                      $script:recorded.Add([pscustomobject]@{ current = $current; total = $total; pct = [math]::Round(100 * $current / $total) })
+                  }
+                  Expand-ArchiveWithProgress -Path $zipPath -DestinationPath $dest -ProgressSink $sink
+
+                  if ((Get-ChildItem $dest -File).Count -ne 3) { Write-Host 'FAIL: expected 3 files'; exit 1 }
+                  if ($recorded.Count -lt 2) { Write-Host 'FAIL: progress did not advance'; exit 1 }
+                  $last = $recorded[-1]
+                  if ($last.current -ne $last.total -or $last.pct -ne 100) { Write-Host "FAIL: progress not at 100 (got $($last.pct))"; exit 1 }
+                  for ($i = 1; $i -lt $recorded.Count; $i++) {
+                      if ($recorded[$i].current -le $recorded[$i-1].current) { Write-Host 'FAIL: progress not monotonic'; exit 1 }
+                  }
+                  Write-Host "PASS: extracted 3 files, progress advanced $($recorded.Count) steps to 100%"
 
     test-win-reconcile:
         runs-on: windows-latest
