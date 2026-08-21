@@ -765,6 +765,34 @@ jobs:
                   }
                   Write-Host "PASS: extracted 3 files, progress advanced $($recorded.Count) steps to 100%"
 
+                  # Zip-Slip protection: a crafted archive with a path-traversal
+                  # entry (`..\escape.txt`) must be rejected and must not write
+                  # outside the destination root.
+                  Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+                  $evilZip = Join-Path $env:TEMP 'evil.zip'
+                  $evilDir = Join-Path $env:TEMP 'evil-root'
+                  New-Item -ItemType Directory -Path $evilDir -Force | Out-Null
+                  New-Item -ItemType Directory -Path (Split-Path $evilZip) -Force -ErrorAction SilentlyContinue | Out-Null
+                  $fs = [System.IO.File]::Open($evilZip, [System.IO.FileMode]::Create)
+                  $arc = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+                  $e = $arc.CreateEntry('..\escape.txt')
+                  $s = $e.Open(); $s.WriteByte(1); $s.Dispose()
+                  $arc.Dispose(); $fs.Dispose()
+                  # Landing area: marker tells us if traversal succeeded.
+                  $outsideRoot = Split-Path $dest -Parent   # one level above dest
+                  $marker = Join-Path $outsideRoot 'escape.txt'
+                  Remove-Item $marker -ErrorAction SilentlyContinue
+                  $evasion = $false
+                  try {
+                      Expand-ArchiveWithProgress -Path $evilZip -DestinationPath $dest -ProgressSink $sink
+                      $evasion = $true   # no exception => traversal not blocked
+                  } catch {
+                      Write-Host "PASS: traversal entry rejected ($($_.Exception.Message))"
+                  }
+                  if ($evasion) { Write-Host 'FAIL: traversal entry was not rejected'; exit 1 }
+                  if (Test-Path $marker) { Write-Host 'FAIL: escape.txt was written outside dest'; exit 1 }
+                  Write-Host 'PASS: no file written outside the destination root'
+
     test-win-reconcile:
         runs-on: windows-latest
         steps:

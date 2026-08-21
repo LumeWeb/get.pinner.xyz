@@ -62,7 +62,17 @@ function Expand-ArchiveWithProgress {
         $total = $zip.Entries.Count
         $count = 0
         foreach ($entry in $zip.Entries) {
-            $dest = Join-Path $DestinationPath $entry.FullName
+            # Reject Zip-Slip / path-traversal entries (CA5389): a crafted
+            # archive can name an entry `..\..\evil` to write outside the
+            # destination, which .NET's ZipFile.ExtractToDirectory blocks and a
+            # raw entry-name extraction would not. Resolve each entry under the
+            # destination root and refuse anything that escapes it.
+            $dest = [System.IO.Path]::GetFullPath((Join-Path $DestinationPath $entry.FullName))
+            $dirChar = [System.IO.Path]::DirectorySeparatorChar
+            $root = ([System.IO.Path]::GetFullPath($DestinationPath)).TrimEnd($dirChar) + $dirChar
+            if (-not $dest.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Archive entry '$($entry.FullName)' escapes the destination directory"
+            }
             $parent = Split-Path $dest -Parent
             if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
             if ($entry.Name) {
